@@ -229,8 +229,12 @@ void setup()
     wav.begin();
     groq.begin();
 
-    // Hardware check: loud square beeps — if silent, wiring/amp power is wrong
-    Serial.println("Speaker hardware test (listen for 2 loud beeps)...");
+    // Hardware check: bit-bang first (proves amp wiring), then I2S tones
+    Serial.println("Speaker hardware test...");
+    Serial.println("1) BITBANG — if silent, amp/power/wiring is wrong");
+    speaker.playBitBangTone(1000, 400);
+    delay(150);
+    Serial.println("2) I2S — if bitbang worked but this is silent, tell us");
     speaker.playTone(880, 350);
     delay(100);
     speaker.playTone(1175, 400);

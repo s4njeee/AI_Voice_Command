@@ -26,7 +26,6 @@ bool Speaker::setSampleRate(uint32_t sampleRate)
         return true;
     }
 
-    // 16-bit stereo clock — matches common MAX98357A + ESP32-S3 setups
     esp_err_t err = i2s_set_clk(
         SPK_I2S_PORT,
         sampleRate,
@@ -46,12 +45,25 @@ bool Speaker::setSampleRate(uint32_t sampleRate)
 
 bool Speaker::begin()
 {
+    Serial.println("========================================");
+    Serial.printf("Speaker Ready %s\n", PROJECT_VERSION);
+    Serial.printf("Amp pins BCLK=%d LRC=%d DIN=%d (I2S0 while playing)\n",
+                  SPK_BCLK, SPK_LRC, SPK_DIN);
+    Serial.println("Check: VIN=5V, SD floating, speaker on amp +/-");
+    Serial.println("========================================");
+    return true;
+}
+
+bool Speaker::ensureOutput()
+{
+    // Mic and speaker share I2S0 — never both installed
+    microphone.end();
+
     if (started_)
     {
         return true;
     }
 
-    // Reset pins so leftover peripheral matrix state cannot mute DIN
     gpio_reset_pin((gpio_num_t)SPK_BCLK);
     gpio_reset_pin((gpio_num_t)SPK_LRC);
     gpio_reset_pin((gpio_num_t)SPK_DIN);
@@ -59,7 +71,6 @@ bool Speaker::begin()
     gpio_set_drive_capability((gpio_num_t)SPK_LRC, GPIO_DRIVE_CAP_3);
     gpio_set_drive_capability((gpio_num_t)SPK_DIN, GPIO_DRIVE_CAP_3);
 
-    // Proven MAX98357A path: 16-bit Philips I2S, stereo frames, L=R
     i2s_config_t i2s_config =
     {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -83,6 +94,9 @@ bool Speaker::begin()
         .data_out_num = SPK_DIN,
         .data_in_num = I2S_PIN_NO_CHANGE
     };
+
+    // Mic may have left I2S0 installed — uninstall first
+    i2s_driver_uninstall(SPK_I2S_PORT);
 
     esp_err_t err = i2s_driver_install(SPK_I2S_PORT, &i2s_config, 0, NULL);
     if (err != ESP_OK)
@@ -108,24 +122,25 @@ bool Speaker::begin()
     }
 
     started_ = true;
-
-    Serial.println("========================================");
-    Serial.printf("Speaker Ready %s\n", PROJECT_VERSION);
-    Serial.printf("I2S1 16-bit stereo  BCLK=%d LRC=%d DIN=%d\n",
-                  SPK_BCLK, SPK_LRC, SPK_DIN);
-    Serial.println("If silent: VIN=5V, SD floating, DIN wire on that GPIO");
-    Serial.println("========================================");
     return true;
+}
+
+void Speaker::releaseOutput(bool restoreMic)
+{
+    end();
+    if (restoreMic)
+    {
+        microphone.begin();
+    }
 }
 
 bool Speaker::playPCM(const int16_t *buffer, size_t samples)
 {
-    if (!started_ || buffer == nullptr || samples == 0)
+    if (!ensureOutput() || buffer == nullptr || samples == 0)
     {
         return false;
     }
 
-    // Static stereo int16 L=R (NOT 32-bit — that was silent on many MAX98357A)
     static int16_t stereo[256];
     size_t done = 0;
 
@@ -159,13 +174,61 @@ bool Speaker::playPCM(const int16_t *buffer, size_t samples)
     return true;
 }
 
+bool Speaker::playBitBangTone(uint32_t freqHz, uint32_t durationMs)
+{
+    // Pure GPIO clocks — if this is silent, amp/wiring/power is wrong (not I2S config)
+    microphone.end();
+    end();
+
+    pinMode(SPK_BCLK, OUTPUT);
+    pinMode(SPK_LRC, OUTPUT);
+    pinMode(SPK_DIN, OUTPUT);
+    digitalWrite(SPK_BCLK, LOW);
+    digitalWrite(SPK_LRC, LOW);
+    digitalWrite(SPK_DIN, LOW);
+
+    Serial.printf("BITBANG amp test %lu Hz %lu ms on BCLK=%d LRC=%d DIN=%d\n",
+                  (unsigned long)freqHz, (unsigned long)durationMs,
+                  SPK_BCLK, SPK_LRC, SPK_DIN);
+
+    const uint32_t sampleRate = 8000;
+    const uint32_t totalSamples = (sampleRate * durationMs) / 1000;
+    const uint32_t period = (freqHz > 0) ? (sampleRate / freqHz) : 1;
+
+    for (uint32_t n = 0; n < totalSamples; n++)
+    {
+        const int16_t sample = ((n % period) < (period / 2)) ? 20000 : -20000;
+
+        for (int ch = 0; ch < 2; ch++)
+        {
+            digitalWrite(SPK_LRC, ch ? HIGH : LOW);
+            for (int bit = 15; bit >= 0; bit--)
+            {
+                digitalWrite(SPK_DIN, (sample >> bit) & 1);
+                digitalWrite(SPK_BCLK, HIGH);
+                delayMicroseconds(1);
+                digitalWrite(SPK_BCLK, LOW);
+                delayMicroseconds(1);
+            }
+        }
+        // Rough pacing (~8 kHz frames); bit-bang is slow on purpose
+        delayMicroseconds(20);
+    }
+
+    digitalWrite(SPK_DIN, LOW);
+    microphone.begin();
+    Serial.println("BITBANG test done — if silent, check amp power/wiring/SD/speaker");
+    return true;
+}
+
 bool Speaker::playTone(uint32_t freqHz, uint32_t durationMs)
 {
-    if (!started_)
+    if (freqHz == 0 || durationMs == 0)
     {
-        begin();
+        return false;
     }
-    if (!setSampleRate(SAMPLE_RATE) || freqHz == 0 || durationMs == 0)
+
+    if (!ensureOutput() || !setSampleRate(SAMPLE_RATE))
     {
         return false;
     }
@@ -174,10 +237,9 @@ bool Speaker::playTone(uint32_t freqHz, uint32_t durationMs)
     static int16_t chunk[128];
     size_t produced = 0;
 
-    Serial.printf("Speaker tone %lu Hz %lu ms (square)\n",
+    Serial.printf("I2S tone %lu Hz %lu ms (square)\n",
                   (unsigned long)freqHz, (unsigned long)durationMs);
 
-    // Loud square wave — easier to hear than a soft sine if gain is low
     while (produced < totalSamples)
     {
         const size_t n = (totalSamples - produced > 128) ? 128 : (totalSamples - produced);
@@ -189,6 +251,7 @@ bool Speaker::playTone(uint32_t freqHz, uint32_t durationMs)
         }
         if (!playPCM(chunk, n))
         {
+            releaseOutput(true);
             return false;
         }
         produced += n;
@@ -196,20 +259,22 @@ bool Speaker::playTone(uint32_t freqHz, uint32_t durationMs)
 
     memset(chunk, 0, sizeof(chunk));
     playPCM(chunk, 128);
+    releaseOutput(true);
     return true;
 }
 
 bool Speaker::playWavFile(const char *filename)
 {
-    if (!started_)
+    if (!ensureOutput())
     {
-        begin();
+        return false;
     }
 
     File file = LittleFS.open(filename, FILE_READ);
     if (!file)
     {
         Serial.printf("Cannot open %s for playback\n", filename);
+        releaseOutput(true);
         return false;
     }
 
@@ -217,6 +282,7 @@ bool Speaker::playWavFile(const char *filename)
     {
         Serial.println("WAV file too small");
         file.close();
+        releaseOutput(true);
         return false;
     }
 
@@ -225,6 +291,7 @@ bool Speaker::playWavFile(const char *filename)
     {
         Serial.println("Failed to read WAV header");
         file.close();
+        releaseOutput(true);
         return false;
     }
 
@@ -232,6 +299,7 @@ bool Speaker::playWavFile(const char *filename)
     {
         Serial.println("Not a WAV file");
         file.close();
+        releaseOutput(true);
         return false;
     }
 
@@ -281,6 +349,7 @@ bool Speaker::playWavFile(const char *filename)
     {
         Serial.println("WAV data chunk not found");
         file.close();
+        releaseOutput(true);
         return false;
     }
 
@@ -293,6 +362,7 @@ bool Speaker::playWavFile(const char *filename)
         {
             Serial.println("WAV data offset past EOF");
             file.close();
+            releaseOutput(true);
             return false;
         }
         dataSize = (uint32_t)(fileSize - dataOffset);
@@ -303,12 +373,14 @@ bool Speaker::playWavFile(const char *filename)
         Serial.printf("Unsupported WAV format=%u bits=%u\n",
                       audioFormat, bitsPerSample);
         file.close();
+        releaseOutput(true);
         return false;
     }
 
     if (!setSampleRate(sampleRate))
     {
         file.close();
+        releaseOutput(true);
         return false;
     }
 
@@ -344,7 +416,7 @@ bool Speaker::playWavFile(const char *filename)
         if (!playPCM(pcm, samples))
         {
             file.close();
-            setSampleRate(SAMPLE_RATE);
+            releaseOutput(true);
             return false;
         }
 
@@ -354,6 +426,7 @@ bool Speaker::playWavFile(const char *filename)
     file.close();
     setSampleRate(SAMPLE_RATE);
     Serial.println("Playback done");
+    releaseOutput(true);
     return true;
 }
 
@@ -429,13 +502,9 @@ bool Speaker::playWavBuffer(const uint8_t *data, size_t length)
         return false;
     }
 
-    if (!started_)
+    if (!ensureOutput() || !setSampleRate(sampleRate))
     {
-        begin();
-    }
-
-    if (!setSampleRate(sampleRate))
-    {
+        releaseOutput(true);
         return false;
     }
 
@@ -467,12 +536,14 @@ bool Speaker::playWavBuffer(const uint8_t *data, size_t length)
         if (!playPCM(pcm, samples))
         {
             setSampleRate(SAMPLE_RATE);
+            releaseOutput(true);
             return false;
         }
     }
 
     setSampleRate(SAMPLE_RATE);
     Serial.println("Playback done");
+    releaseOutput(true);
     return true;
 }
 
@@ -731,7 +802,10 @@ bool Speaker::playMp3Buffer(const uint8_t *mp3, size_t len)
 
     if (!started_)
     {
-        begin();
+        if (!ensureOutput())
+        {
+            return false;
+        }
     }
 
     // All large buffers are static — minimp3 on the stack overflows loopTask (~8KB)
@@ -832,11 +906,6 @@ bool Speaker::speakText(const String &text)
     const String encoded = urlEncode(clipped);
     Serial.printf("Speaking (online TTS): %s\n", clipped.c_str());
 
-    microphone.end();
-    if (!started_)
-    {
-        begin();
-    }
     delay(20);
 
     uint8_t *mp3 = nullptr;
@@ -868,7 +937,7 @@ bool Speaker::speakText(const String &text)
         }
     }
 
-    microphone.begin();
+    releaseOutput(true);
 
     if (ok)
     {
@@ -902,5 +971,4 @@ void Speaker::end()
     i2s_driver_uninstall(SPK_I2S_PORT);
     started_ = false;
     currentSampleRate = 0;
-    Serial.println("Speaker stopped for WiFi");
 }
