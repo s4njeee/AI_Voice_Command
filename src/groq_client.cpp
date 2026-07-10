@@ -48,6 +48,14 @@ void GroqClient::handleApiFailure(int httpStatus, const String &body, const char
     {
         Serial.println("Groq rejected the API key. Check GROQ_API_KEY in secrets.h");
     }
+    else if (httpStatus == 400 && body.indexOf("model_terms_required") >= 0)
+    {
+        Serial.println("========================================");
+        Serial.println("Accept Groq Orpheus TTS terms once:");
+        Serial.println("https://console.groq.com/playground?model=canopylabs/orpheus-v1-english");
+        Serial.println("Then reboot. Until then, Google TTS fallback is used.");
+        Serial.println("========================================");
+    }
     else if (httpStatus == 404)
     {
         Serial.println("Model not found on Groq. Firmware must use Groq model IDs.");

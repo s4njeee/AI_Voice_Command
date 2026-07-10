@@ -1,8 +1,10 @@
 #include "speaker.h"
 #include "config.h"
+#include "microphone.h"
 
 #include <driver/i2s.h>
 #include <LittleFS.h>
+#include "Audio.h"
 
 Speaker speaker;
 
@@ -237,6 +239,58 @@ bool Speaker::playWavFile(const char *filename)
     file.close();
     setSampleRate(SAMPLE_RATE);
     Serial.println("Playback done");
+    return true;
+}
+
+bool Speaker::speakText(const String &text)
+{
+    if (text.length() == 0)
+    {
+        return false;
+    }
+
+    String clipped = text;
+    if (clipped.length() > 180)
+    {
+        clipped = clipped.substring(0, 180);
+    }
+
+    // Free both I2S ports so ESP32-audioI2S can drive the amp
+    end();
+    microphone.end();
+    delay(20);
+
+    Audio audio;
+    audio.setPinout(SPK_BCLK, SPK_LRC, SPK_DIN);
+    audio.setVolume(21);
+
+    Serial.println("Speaking on speaker (Google TTS fallback)...");
+    if (!audio.connecttospeech(clipped.c_str(), "en"))
+    {
+        Serial.println("Google TTS failed to start");
+        begin();
+        microphone.begin();
+        return false;
+    }
+
+    const unsigned long start = millis();
+    while (audio.isRunning())
+    {
+        audio.loop();
+        if (millis() - start > 45000)
+        {
+            Serial.println("TTS playback timeout");
+            break;
+        }
+        delay(1);
+    }
+
+    audio.stopSong();
+    delay(30);
+
+    begin();
+    microphone.begin();
+    Serial.println("Speaker playback done");
     return true;
 }
 

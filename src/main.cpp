@@ -55,8 +55,12 @@ static bool containsWakeWord(const String &text)
         "smartcane",
         "smartcan",
         "smartkane",
+        "smartcain",
         "smartgain",
         "smartgame",
+        "mygame",
+        "mattcain",
+        "matcain",
         "marcane",
         "sparkcane",
         nullptr};
@@ -187,13 +191,15 @@ static bool handleCommand(const String &command)
     Serial.print("Smartcane: ");
     Serial.println(reply);
 
-    if (!groq.textToSpeech(reply, REPLY_FILE))
+    if (groq.textToSpeech(reply, REPLY_FILE) && speaker.playWavFile(REPLY_FILE))
     {
-        Serial.println("TTS failed — printing reply only.");
-        return false;
+        return true;
     }
 
-    return speaker.playWavFile(REPLY_FILE);
+    Serial.println("Groq voice unavailable — speaking with Google TTS on the speaker.");
+    Serial.println("For Groq voice: open and accept terms:");
+    Serial.println("https://console.groq.com/playground?model=canopylabs/orpheus-v1-english");
+    return speaker.speakText(reply);
 }
 
 void setup()
@@ -300,7 +306,7 @@ void loop()
         Serial.println("Asking what the user wants...");
         if (!speaker.playWavFile(PROMPT_FILE))
         {
-            Serial.println(PROMPT_TEXT);
+            speaker.speakText(PROMPT_TEXT);
         }
 
         if (!microphone.waitForSpeech(6000))

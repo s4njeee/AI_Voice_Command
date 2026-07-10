@@ -13,6 +13,9 @@ public:
 
     bool playWavFile(const char *filename);
 
+    // Speaks text via Google TTS over I2S (fallback when Groq TTS unavailable)
+    bool speakText(const String &text);
+
     void stop();
     void end();
 
