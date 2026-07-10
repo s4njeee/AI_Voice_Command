@@ -6,7 +6,7 @@
 //======================================================
 
 #define PROJECT_NAME    "Smartcane AI Voice (Groq)"
-#define PROJECT_VERSION "3.2.0-GROQ"
+#define PROJECT_VERSION "3.3.0-GROQ"
 
 //======================================================
 // Wake Word
@@ -29,11 +29,18 @@
 #define AI_CHAT_URL "https://api.groq.com/openai/v1/chat/completions"
 #define AI_TTS_URL  "https://api.groq.com/openai/v1/audio/speech"
 
-// Locked Groq model IDs (ignore any OpenAI names left in secrets.h)
+// Locked Groq model IDs — Orpheus playground:
+// https://console.groq.com/playground?model=canopylabs/orpheus-v1-english
 #define GROQ_STT_MODEL  "whisper-large-v3-turbo"
 #define GROQ_CHAT_MODEL "llama-3.1-8b-instant"
 #define GROQ_TTS_MODEL  "canopylabs/orpheus-v1-english"
-#define GROQ_TTS_VOICE  "austin"
+
+// Orpheus English voices: autumn, diana, hannah, austin, daniel, troy
+// Change this to the voice you selected in the Groq playground.
+#define GROQ_TTS_VOICE  "troy"
+
+// Orpheus input limit is 200 characters
+#define GROQ_TTS_MAX_CHARS 200
 
 //======================================================
 // Audio Configuration
@@ -94,7 +101,13 @@
 #define REPLY_FILE   "/reply.wav"
 #define PROMPT_FILE  "/prompt.wav"
 
-#define PROMPT_TEXT  "Hi, I am Smartcane. What do you need?"
+// Orpheus-style prompt with vocal direction (no WAV upload needed — generated live)
+#define PROMPT_TEXT \
+    "[cheerful] Hi, I am Smartcane. What do you need?"
+
+// Playground sample line (used once at boot to verify Orpheus voice)
+#define ORPHEUS_TEST_TEXT \
+    "Welcome to Orpheus text-to-speech. [cheerful] This is Smartcane ready."
 
 //======================================================
 // HTTPS

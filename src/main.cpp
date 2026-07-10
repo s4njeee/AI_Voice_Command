@@ -191,14 +191,13 @@ static bool handleCommand(const String &command)
     Serial.print("Smartcane: ");
     Serial.println(reply);
 
-    if (groq.textToSpeech(reply, REPLY_FILE) && speaker.playWavFile(REPLY_FILE))
+    // Prefer Orpheus live speech (no WAV upload). Google TTS is fallback only.
+    if (groq.speak(reply))
     {
         return true;
     }
 
-    Serial.println("Groq voice unavailable — speaking with Google TTS on the speaker.");
-    Serial.println("For Groq voice: open and accept terms:");
-    Serial.println("https://console.groq.com/playground?model=canopylabs/orpheus-v1-english");
+    Serial.println("Orpheus failed — Google TTS fallback on speaker.");
     return speaker.speakText(reply);
 }
 
@@ -233,7 +232,12 @@ void setup()
     if (wifiManager.connected())
     {
         setBusy(true);
-        groq.ensurePromptAudio(PROMPT_FILE);
+        Serial.println("Testing Orpheus voice on speaker (no WAV upload)...");
+        if (!groq.speak(ORPHEUS_TEST_TEXT))
+        {
+            Serial.println("Orpheus test failed — check terms + voice name.");
+            speaker.speakText(PROMPT_TEXT);
+        }
         setBusy(false);
     }
 
@@ -304,7 +308,7 @@ void loop()
     if (command.length() < 2)
     {
         Serial.println("Asking what the user wants...");
-        if (!speaker.playWavFile(PROMPT_FILE))
+        if (!groq.speak(PROMPT_TEXT))
         {
             speaker.speakText(PROMPT_TEXT);
         }

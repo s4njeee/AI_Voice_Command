@@ -88,34 +88,212 @@ bool GroqClient::begin()
     Serial.println("Groq AI client ready (api.groq.com)");
     Serial.printf("STT=%s\n", GROQ_STT_MODEL);
     Serial.printf("CHAT=%s\n", GROQ_CHAT_MODEL);
-    Serial.printf("TTS=%s\n", GROQ_TTS_MODEL);
+    Serial.printf("TTS=%s voice=%s\n", GROQ_TTS_MODEL, GROQ_TTS_VOICE);
     return true;
 }
 
 bool GroqClient::ensurePromptAudio(const char *outputFile)
 {
-    if (LittleFS.exists(outputFile))
-    {
-        File existing = LittleFS.open(outputFile, FILE_READ);
-        if (existing && existing.size() > 44)
-        {
-            existing.close();
-            Serial.println("Cached Smartcane greeting ready");
-            return true;
-        }
-        if (existing)
-        {
-            existing.close();
-        }
-        LittleFS.remove(outputFile);
-    }
+    // No pre-uploaded WAV required — Orpheus generates the greeting live.
+    (void)outputFile;
+    Serial.println("Prompt audio will be generated live with Orpheus (no WAV upload).");
+    return true;
+}
 
-    Serial.println("Generating Smartcane greeting via Groq TTS...");
-    if (!textToSpeech(PROMPT_TEXT, outputFile))
+String GroqClient::clipForOrpheus(const String &text) const
+{
+    String clipped = text;
+    clipped.trim();
+    if (clipped.length() > GROQ_TTS_MAX_CHARS)
     {
-        Serial.println("Greeting TTS skipped (will print text instead when woken).");
+        clipped = clipped.substring(0, GROQ_TTS_MAX_CHARS - 3) + "...";
+    }
+    return clipped;
+}
+
+bool GroqClient::fetchSpeechWav(const String &text, uint8_t **outData, size_t *outLen)
+{
+    *outData = nullptr;
+    *outLen = 0;
+
+    const String clipped = clipForOrpheus(text);
+    if (clipped.length() == 0)
+    {
         return false;
     }
+
+    const String key = groqApiKey();
+    pauseAudioForApi();
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(HTTPS_TIMEOUT / 1000);
+
+    HTTPClient https;
+    https.setTimeout(HTTPS_TIMEOUT);
+
+    Serial.printf("Orpheus TTS voice=%s model=%s\n", GROQ_TTS_VOICE, GROQ_TTS_MODEL);
+    Serial.printf("Orpheus text: %s\n", clipped.c_str());
+
+    if (!https.begin(client, AI_TTS_URL))
+    {
+        Serial.println("Unable to connect to Groq TTS API");
+        resumeAudioAfterApi();
+        return false;
+    }
+
+    https.addHeader("Content-Type", "application/json");
+    https.addHeader("Authorization", "Bearer " + key);
+
+    JsonDocument doc;
+    doc["model"] = GROQ_TTS_MODEL;
+    doc["input"] = clipped;
+    doc["voice"] = GROQ_TTS_VOICE;
+    doc["response_format"] = "wav";
+
+    String body;
+    serializeJson(doc, body);
+
+    int httpCode = https.POST(body);
+    if (httpCode <= 0)
+    {
+        Serial.printf("TTS HTTP error: %s\n", https.errorToString(httpCode).c_str());
+        https.end();
+        resumeAudioAfterApi();
+        return false;
+    }
+
+    if (httpCode != 200)
+    {
+        handleApiFailure(httpCode, https.getString(), "TTS");
+        https.end();
+        resumeAudioAfterApi();
+        return false;
+    }
+
+    const int contentLength = https.getSize();
+    size_t capacity = contentLength > 0 ? (size_t)contentLength + 16 : 64 * 1024;
+    uint8_t *buffer = (uint8_t *)ps_malloc(capacity);
+    if (!buffer)
+    {
+        buffer = (uint8_t *)malloc(capacity);
+    }
+    if (!buffer)
+    {
+        Serial.println("Out of memory for Orpheus WAV");
+        https.end();
+        resumeAudioAfterApi();
+        return false;
+    }
+
+    WiFiClient *stream = https.getStreamPtr();
+    size_t total = 0;
+    unsigned long lastData = millis();
+
+    while (https.connected() || stream->available())
+    {
+        size_t avail = stream->available();
+        if (avail == 0)
+        {
+            if (millis() - lastData > 5000)
+            {
+                break;
+            }
+            delay(1);
+            continue;
+        }
+
+        if (total + avail > capacity)
+        {
+            size_t newCap = capacity * 2;
+            while (total + avail > newCap)
+            {
+                newCap *= 2;
+            }
+            uint8_t *grown = (uint8_t *)realloc(buffer, newCap);
+            if (!grown)
+            {
+                Serial.println("Orpheus WAV grew too large");
+                free(buffer);
+                https.end();
+                resumeAudioAfterApi();
+                return false;
+            }
+            buffer = grown;
+            capacity = newCap;
+        }
+
+        int n = stream->readBytes(buffer + total, avail);
+        if (n <= 0)
+        {
+            break;
+        }
+        total += n;
+        lastData = millis();
+    }
+
+    https.end();
+    resumeAudioAfterApi();
+
+    if (total < 44)
+    {
+        Serial.println("Orpheus returned empty audio");
+        free(buffer);
+        return false;
+    }
+
+    *outData = buffer;
+    *outLen = total;
+    Serial.printf("Orpheus WAV ready (%u bytes)\n", (unsigned)total);
+    return true;
+}
+
+bool GroqClient::speak(const String &text)
+{
+    uint8_t *wav = nullptr;
+    size_t len = 0;
+    if (!fetchSpeechWav(text, &wav, &len))
+    {
+        return false;
+    }
+
+    const bool ok = speaker.playWavBuffer(wav, len);
+    free(wav);
+    return ok;
+}
+
+bool GroqClient::textToSpeech(const String &text, const char *outputFile)
+{
+    uint8_t *wav = nullptr;
+    size_t len = 0;
+    if (!fetchSpeechWav(text, &wav, &len))
+    {
+        return false;
+    }
+
+    bool saved = false;
+    if (outputFile != nullptr)
+    {
+        if (LittleFS.exists(outputFile))
+        {
+            LittleFS.remove(outputFile);
+        }
+        File out = LittleFS.open(outputFile, FILE_WRITE);
+        if (out)
+        {
+            out.write(wav, len);
+            out.close();
+            saved = true;
+            Serial.printf("TTS cached to %s\n", outputFile);
+        }
+        else
+        {
+            Serial.println("LittleFS cache skipped — playing from RAM");
+        }
+    }
+    (void)saved;
+
+    free(wav);
     return true;
 }
 
@@ -396,110 +574,4 @@ String GroqClient::speechToText(const char *wavFile)
     String text = result["text"].as<String>();
     text.trim();
     return text;
-}
-
-bool GroqClient::textToSpeech(const String &text, const char *outputFile)
-{
-    if (text.length() == 0)
-    {
-        return false;
-    }
-
-    const String key = groqApiKey();
-    pauseAudioForApi();
-
-    WiFiClientSecure client;
-    client.setInsecure();
-    client.setTimeout(HTTPS_TIMEOUT / 1000);
-
-    HTTPClient https;
-    https.setTimeout(HTTPS_TIMEOUT);
-
-    Serial.printf("Groq TTS -> %s model=%s\n", AI_TTS_URL, GROQ_TTS_MODEL);
-    if (!https.begin(client, AI_TTS_URL))
-    {
-        Serial.println("Unable to connect to Groq TTS API");
-        resumeAudioAfterApi();
-        return false;
-    }
-
-    https.addHeader("Content-Type", "application/json");
-    https.addHeader("Authorization", "Bearer " + key);
-
-    JsonDocument doc;
-    doc["model"] = GROQ_TTS_MODEL;
-    doc["input"] = text;
-    doc["voice"] = GROQ_TTS_VOICE;
-    doc["response_format"] = "wav";
-
-    String body;
-    serializeJson(doc, body);
-
-    int httpCode = https.POST(body);
-    if (httpCode <= 0)
-    {
-        Serial.printf("TTS HTTP error: %s\n", https.errorToString(httpCode).c_str());
-        https.end();
-        resumeAudioAfterApi();
-        return false;
-    }
-
-    if (httpCode != 200)
-    {
-        handleApiFailure(httpCode, https.getString(), "TTS");
-        https.end();
-        resumeAudioAfterApi();
-        return false;
-    }
-
-    if (LittleFS.exists(outputFile))
-    {
-        LittleFS.remove(outputFile);
-    }
-
-    File out = LittleFS.open(outputFile, FILE_WRITE);
-    if (!out)
-    {
-        Serial.println("Cannot create TTS output file on LittleFS");
-        https.end();
-        resumeAudioAfterApi();
-        return false;
-    }
-
-    WiFiClient *stream = https.getStreamPtr();
-    uint8_t buffer[1024];
-    size_t total = 0;
-    unsigned long lastData = millis();
-
-    while (https.connected() || stream->available())
-    {
-        size_t avail = stream->available();
-        if (avail == 0)
-        {
-            if (millis() - lastData > 5000)
-            {
-                break;
-            }
-            delay(1);
-            continue;
-        }
-
-        size_t toRead = avail > sizeof(buffer) ? sizeof(buffer) : avail;
-        int n = stream->readBytes(buffer, toRead);
-        if (n <= 0)
-        {
-            break;
-        }
-
-        out.write(buffer, n);
-        total += n;
-        lastData = millis();
-    }
-
-    out.close();
-    https.end();
-    resumeAudioAfterApi();
-
-    Serial.printf("TTS saved %u bytes to %s\n", (unsigned)total, outputFile);
-    return total > 44;
 }

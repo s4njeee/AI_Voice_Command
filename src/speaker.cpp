@@ -242,6 +242,115 @@ bool Speaker::playWavFile(const char *filename)
     return true;
 }
 
+bool Speaker::playWavBuffer(const uint8_t *data, size_t length)
+{
+    if (data == nullptr || length < 44)
+    {
+        Serial.println("WAV buffer too small");
+        return false;
+    }
+
+    if (memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WAVE", 4) != 0)
+    {
+        Serial.println("Not a WAV buffer");
+        return false;
+    }
+
+    const uint16_t audioFormat = data[20] | (data[21] << 8);
+    const uint16_t numChannels = data[22] | (data[23] << 8);
+    const uint32_t sampleRate =
+        data[24] |
+        (data[25] << 8) |
+        (data[26] << 16) |
+        (data[27] << 24);
+    const uint16_t bitsPerSample = data[34] | (data[35] << 8);
+
+    size_t pos = 12;
+    size_t dataOffset = 0;
+    size_t dataSize = 0;
+    bool foundData = false;
+
+    while (pos + 8 <= length)
+    {
+        const char *chunkId = (const char *)(data + pos);
+        const uint32_t chunkSize =
+            data[pos + 4] |
+            (data[pos + 5] << 8) |
+            (data[pos + 6] << 16) |
+            (data[pos + 7] << 24);
+        pos += 8;
+
+        if (memcmp(chunkId, "data", 4) == 0)
+        {
+            dataOffset = pos;
+            dataSize = chunkSize;
+            foundData = true;
+            break;
+        }
+
+        pos += chunkSize;
+    }
+
+    if (!foundData || dataOffset + dataSize > length)
+    {
+        Serial.println("WAV data chunk missing in buffer");
+        return false;
+    }
+
+    if (audioFormat != 1 || bitsPerSample != 16)
+    {
+        Serial.printf("Unsupported WAV format=%u bits=%u\n",
+                      audioFormat, bitsPerSample);
+        return false;
+    }
+
+    if (!started_)
+    {
+        begin();
+    }
+
+    if (!setSampleRate(sampleRate))
+    {
+        return false;
+    }
+
+    Serial.printf("Playing Orpheus WAV (%lu Hz, %u ch, %u bytes)\n",
+                  sampleRate, numChannels, (unsigned)dataSize);
+
+    size_t remaining = dataSize;
+    size_t offset = dataOffset;
+    int16_t pcm[256];
+
+    while (remaining > 0)
+    {
+        size_t toRead = remaining > sizeof(pcm) ? sizeof(pcm) : remaining;
+        memcpy(pcm, data + offset, toRead);
+        offset += toRead;
+        remaining -= toRead;
+
+        size_t samples = toRead / sizeof(int16_t);
+        if (numChannels == 2)
+        {
+            size_t monoSamples = samples / 2;
+            for (size_t i = 0; i < monoSamples; i++)
+            {
+                pcm[i] = (int16_t)(((int32_t)pcm[i * 2] + pcm[i * 2 + 1]) / 2);
+            }
+            samples = monoSamples;
+        }
+
+        if (!playPCM(pcm, samples))
+        {
+            setSampleRate(SAMPLE_RATE);
+            return false;
+        }
+    }
+
+    setSampleRate(SAMPLE_RATE);
+    Serial.println("Playback done");
+    return true;
+}
+
 bool Speaker::speakText(const String &text)
 {
     if (text.length() == 0)

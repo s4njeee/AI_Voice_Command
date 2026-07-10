@@ -13,6 +13,9 @@ public:
 
     bool playWavFile(const char *filename);
 
+    // Play a WAV sitting in RAM/PSRAM (from Groq Orpheus)
+    bool playWavBuffer(const uint8_t *data, size_t length);
+
     // Speaks text via Google TTS over I2S (fallback when Groq TTS unavailable)
     bool speakText(const String &text);
 
