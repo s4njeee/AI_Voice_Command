@@ -1,5 +1,6 @@
 #include "microphone.h"
 #include "config.h"
+#include "wifi_manager.h"
 
 Microphone microphone;
 
@@ -104,12 +105,24 @@ bool Microphone::waitForSpeech(uint32_t timeoutMs)
 {
     const uint32_t start = millis();
     uint8_t hotFrames = 0;
+    unsigned long lastWifiCheck = millis();
 
     while (true)
     {
         if (timeoutMs > 0 && (millis() - start) >= timeoutMs)
         {
             return false;
+        }
+
+        // Keep WiFi maintenance alive while listening
+        if (millis() - lastWifiCheck >= 1000)
+        {
+            lastWifiCheck = millis();
+            wifiManager.loop();
+            if (!wifiManager.connected())
+            {
+                return false;
+            }
         }
 
         const uint32_t level = measureLevel();

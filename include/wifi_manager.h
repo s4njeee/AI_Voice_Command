@@ -9,6 +9,13 @@ public:
     void loop();
     bool connected();
     String ipAddress();
+
+private:
+    void connectBlocking(uint32_t timeoutMs);
+    void printStatus();
+    unsigned long disconnectSince_ = 0;
+    unsigned long lastAttempt_ = 0;
+    bool wasConnected_ = false;
 };
 
 extern WiFiManagerESP wifiManager;
