@@ -1,0 +1,26 @@
+# How to run Smartcane (this PC)
+
+You do **not** need GitHub Pull Requests.
+
+## Project folder (already pulled)
+```
+C:\Users\Nexus\Desktop\Smartcane demo
+```
+
+## Steps
+1. Open **that folder** in Cursor / VS Code with PlatformIO
+2. Edit `include/secrets.h`:
+   - Wi-Fi SSID + password
+   - `GROQ_API_KEY` (`gsk_...`)
+3. Connect ESP32-S3 by USB
+4. PlatformIO: **Build** then **Upload** then **Monitor**
+5. Serial must show: `3.4.0-GROQ`
+
+## WAV files (automatic)
+| File | Purpose |
+|------|---------|
+| `/record.wav` | Your voice → Groq Whisper |
+| `/prompt.wav` | Orpheus greeting on speaker |
+| `/reply.wav` | Orpheus AI answer on speaker |
+
+Firmware creates these. You never upload `.wav` files.

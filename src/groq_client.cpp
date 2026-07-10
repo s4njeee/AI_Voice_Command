@@ -94,10 +94,17 @@ bool GroqClient::begin()
 
 bool GroqClient::ensurePromptAudio(const char *outputFile)
 {
-    // No pre-uploaded WAV required — Orpheus generates the greeting live.
-    (void)outputFile;
-    Serial.println("Prompt audio will be generated live with Orpheus (no WAV upload).");
-    return true;
+    Serial.printf("Building %s with Orpheus voice=%s...\n",
+                  outputFile, GROQ_TTS_VOICE);
+
+    // Prefer the Smartcane prompt; fall back to playground-style test line
+    if (speakToFile(PROMPT_TEXT, outputFile))
+    {
+        return true;
+    }
+
+    Serial.println("Prompt failed — trying Orpheus test line...");
+    return speakToFile(ORPHEUS_TEST_TEXT, outputFile);
 }
 
 String GroqClient::clipForOrpheus(const String &text) const
@@ -109,6 +116,87 @@ String GroqClient::clipForOrpheus(const String &text) const
         clipped = clipped.substring(0, GROQ_TTS_MAX_CHARS - 3) + "...";
     }
     return clipped;
+}
+
+bool GroqClient::saveWavFile(const char *path, const uint8_t *data, size_t len)
+{
+    if (path == nullptr || data == nullptr || len < 44)
+    {
+        return false;
+    }
+
+    if (LittleFS.exists(path))
+    {
+        LittleFS.remove(path);
+    }
+
+    File out = LittleFS.open(path, "w");
+    if (!out)
+    {
+        Serial.printf("Cannot write %s\n", path);
+        return false;
+    }
+
+    const size_t written = out.write(data, len);
+    out.flush();
+    out.close();
+
+    if (written != len)
+    {
+        Serial.printf("Short write to %s (%u/%u)\n",
+                      path, (unsigned)written, (unsigned)len);
+        return false;
+    }
+
+    Serial.printf("Saved Orpheus audio -> %s (%u bytes)\n",
+                  path, (unsigned)len);
+    return true;
+}
+
+bool GroqClient::speakToFile(const String &text, const char *wavPath)
+{
+    uint8_t *wav = nullptr;
+    size_t len = 0;
+    if (!fetchSpeechWav(text, &wav, &len))
+    {
+        return false;
+    }
+
+    const bool saved = saveWavFile(wavPath, wav, len);
+    bool played = false;
+
+    if (saved)
+    {
+        played = speaker.playWavFile(wavPath);
+    }
+
+    if (!played)
+    {
+        Serial.println("Playing Orpheus WAV from RAM...");
+        played = speaker.playWavBuffer(wav, len);
+    }
+
+    free(wav);
+    return played;
+}
+
+bool GroqClient::speak(const String &text)
+{
+    return speakToFile(text, REPLY_FILE);
+}
+
+bool GroqClient::textToSpeech(const String &text, const char *outputFile)
+{
+    uint8_t *wav = nullptr;
+    size_t len = 0;
+    if (!fetchSpeechWav(text, &wav, &len))
+    {
+        return false;
+    }
+
+    const bool saved = saveWavFile(outputFile, wav, len);
+    free(wav);
+    return saved;
 }
 
 bool GroqClient::fetchSpeechWav(const String &text, uint8_t **outData, size_t *outLen)
@@ -245,55 +333,6 @@ bool GroqClient::fetchSpeechWav(const String &text, uint8_t **outData, size_t *o
     *outData = buffer;
     *outLen = total;
     Serial.printf("Orpheus WAV ready (%u bytes)\n", (unsigned)total);
-    return true;
-}
-
-bool GroqClient::speak(const String &text)
-{
-    uint8_t *wav = nullptr;
-    size_t len = 0;
-    if (!fetchSpeechWav(text, &wav, &len))
-    {
-        return false;
-    }
-
-    const bool ok = speaker.playWavBuffer(wav, len);
-    free(wav);
-    return ok;
-}
-
-bool GroqClient::textToSpeech(const String &text, const char *outputFile)
-{
-    uint8_t *wav = nullptr;
-    size_t len = 0;
-    if (!fetchSpeechWav(text, &wav, &len))
-    {
-        return false;
-    }
-
-    bool saved = false;
-    if (outputFile != nullptr)
-    {
-        if (LittleFS.exists(outputFile))
-        {
-            LittleFS.remove(outputFile);
-        }
-        File out = LittleFS.open(outputFile, FILE_WRITE);
-        if (out)
-        {
-            out.write(wav, len);
-            out.close();
-            saved = true;
-            Serial.printf("TTS cached to %s\n", outputFile);
-        }
-        else
-        {
-            Serial.println("LittleFS cache skipped — playing from RAM");
-        }
-    }
-    (void)saved;
-
-    free(wav);
     return true;
 }
 

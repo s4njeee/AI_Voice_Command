@@ -12,12 +12,16 @@ public:
 
     String chat(const String &prompt);
 
-    // Generate Orpheus WAV to LittleFS (optional cache)
+    // Save Orpheus speech into a .wav path (PROMPT_FILE / REPLY_FILE)
     bool textToSpeech(const String &text, const char *outputFile);
 
-    // Generate Orpheus audio and play on speaker (no file upload needed)
+    // Generate Orpheus .wav, save to path if possible, play on speaker
+    bool speakToFile(const String &text, const char *wavPath);
+
+    // Same as speakToFile(text, REPLY_FILE)
     bool speak(const String &text);
 
+    // Build PROMPT_FILE with Orpheus and play it
     bool ensurePromptAudio(const char *outputFile);
 
     bool quotaBlocked() const { return quotaBlocked_; }
@@ -28,6 +32,7 @@ private:
     void handleApiFailure(int httpStatus, const String &body, const char *where);
     String clipForOrpheus(const String &text) const;
     bool fetchSpeechWav(const String &text, uint8_t **outData, size_t *outLen);
+    bool saveWavFile(const char *path, const uint8_t *data, size_t len);
 };
 
 extern GroqClient groq;

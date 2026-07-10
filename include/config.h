@@ -6,7 +6,7 @@
 //======================================================
 
 #define PROJECT_NAME    "Smartcane AI Voice (Groq)"
-#define PROJECT_VERSION "3.3.0-GROQ"
+#define PROJECT_VERSION "3.4.0-GROQ"
 
 //======================================================
 // Wake Word
@@ -94,18 +94,22 @@
 #define LED_PIN            2
 
 //======================================================
-// File Names
+// WAV files on LittleFS (created automatically by firmware)
 //======================================================
+// RECORD_FILE  = mic recording sent to Groq Whisper (STT)
+// REPLY_FILE   = Orpheus TTS of the AI answer (played on speaker)
+// PROMPT_FILE  = Orpheus TTS greeting "what do you need?" (played on wake)
+// You do NOT upload these files — Groq generates prompt/reply as .wav
 
 #define RECORD_FILE  "/record.wav"
 #define REPLY_FILE   "/reply.wav"
 #define PROMPT_FILE  "/prompt.wav"
 
-// Orpheus-style prompt with vocal direction (no WAV upload needed — generated live)
+// Orpheus-style prompt with vocal direction
 #define PROMPT_TEXT \
     "[cheerful] Hi, I am Smartcane. What do you need?"
 
-// Playground sample line (used once at boot to verify Orpheus voice)
+// Playground-style line used when building PROMPT_FILE at boot
 #define ORPHEUS_TEST_TEXT \
     "Welcome to Orpheus text-to-speech. [cheerful] This is Smartcane ready."
 
