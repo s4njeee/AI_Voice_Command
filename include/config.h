@@ -6,7 +6,7 @@
 //======================================================
 
 #define PROJECT_NAME    "Smartcane AI Voice (Groq)"
-#define PROJECT_VERSION "3.0.0-GROQ"
+#define PROJECT_VERSION "3.1.0-GROQ"
 
 //======================================================
 // Wake Word
@@ -28,6 +28,12 @@
 #define AI_PORT 443
 #define AI_CHAT_URL "https://api.groq.com/openai/v1/chat/completions"
 #define AI_TTS_URL  "https://api.groq.com/openai/v1/audio/speech"
+
+// Locked Groq model IDs (ignore any OpenAI names left in secrets.h)
+#define GROQ_STT_MODEL  "whisper-large-v3-turbo"
+#define GROQ_CHAT_MODEL "llama-3.1-8b-instant"
+#define GROQ_TTS_MODEL  "canopylabs/orpheus-v1-english"
+#define GROQ_TTS_VOICE  "austin"
 
 //======================================================
 // Audio Configuration

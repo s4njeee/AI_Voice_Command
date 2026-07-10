@@ -1,6 +1,8 @@
 #include "groq_client.h"
 #include "config.h"
 #include "secrets.h"
+#include "microphone.h"
+#include "speaker.h"
 
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -9,7 +11,6 @@
 
 GroqClient groq;
 
-// Resolve key from whichever name the user filled in
 static String groqApiKey()
 {
 #if defined(GROQ_API_KEY)
@@ -26,22 +27,35 @@ static String groqApiKey()
 #endif
 }
 
+static void pauseAudioForApi()
+{
+    microphone.end();
+    speaker.end();
+    delay(30);
+}
+
+static void resumeAudioAfterApi()
+{
+    microphone.begin();
+    speaker.begin();
+}
+
 void GroqClient::handleApiFailure(int httpStatus, const String &body, const char *where)
 {
     Serial.printf("%s failed HTTP %d\n", where, httpStatus);
 
     if (httpStatus == 401)
     {
-        Serial.println("Groq rejected the API key.");
-        Serial.println("1. Open https://console.groq.com/keys");
-        Serial.println("2. Create a key starting with gsk_");
-        Serial.println("3. Put it in include/secrets.h as GROQ_API_KEY");
-        Serial.println("4. Build + Upload again (reboot alone is not enough)");
+        Serial.println("Groq rejected the API key. Check GROQ_API_KEY in secrets.h");
+    }
+    else if (httpStatus == 404)
+    {
+        Serial.println("Model not found on Groq. Firmware must use Groq model IDs.");
     }
     else if (httpStatus == 429 || body.indexOf("rate_limit") >= 0)
     {
         quotaBlocked_ = true;
-        Serial.println("Groq free-tier rate limit hit. Wait ~1 minute, then reboot.");
+        Serial.println("Groq free-tier rate limit hit. Wait, then reboot.");
     }
 
     if (body.length() > 0 && body.length() < 600)
@@ -59,12 +73,14 @@ bool GroqClient::begin()
         Serial.println("GROQ KEY MISSING OR INVALID");
         Serial.println("Edit include/secrets.h:");
         Serial.println("  #define GROQ_API_KEY \"gsk_...\"");
-        Serial.println("Then PlatformIO: Build + Upload");
+        Serial.println("Then Build + Upload");
         Serial.println("========================================");
     }
 
     Serial.println("Groq AI client ready (api.groq.com)");
-    Serial.printf("STT=%s  CHAT=%s  TTS=%s\n", STT_MODEL, CHAT_MODEL, TTS_MODEL);
+    Serial.printf("STT=%s\n", GROQ_STT_MODEL);
+    Serial.printf("CHAT=%s\n", GROQ_CHAT_MODEL);
+    Serial.printf("TTS=%s\n", GROQ_TTS_MODEL);
     return true;
 }
 
@@ -148,6 +164,8 @@ static String readRemainingBody(WiFiClientSecure &client)
 String GroqClient::chat(const String &prompt)
 {
     const String key = groqApiKey();
+    pauseAudioForApi();
+
     WiFiClientSecure client;
     client.setInsecure();
     client.setTimeout(HTTPS_TIMEOUT / 1000);
@@ -158,6 +176,7 @@ String GroqClient::chat(const String &prompt)
     if (!https.begin(client, AI_CHAT_URL))
     {
         Serial.println("Unable to connect to Groq chat API");
+        resumeAudioAfterApi();
         return "";
     }
 
@@ -165,7 +184,7 @@ String GroqClient::chat(const String &prompt)
     https.addHeader("Authorization", "Bearer " + key);
 
     JsonDocument doc;
-    doc["model"] = CHAT_MODEL;
+    doc["model"] = GROQ_CHAT_MODEL;
     doc["temperature"] = 0.2;
     doc["max_tokens"] = 120;
 
@@ -191,6 +210,7 @@ String GroqClient::chat(const String &prompt)
     {
         Serial.printf("Chat HTTP error: %s\n", https.errorToString(httpCode).c_str());
         https.end();
+        resumeAudioAfterApi();
         return "";
     }
 
@@ -201,12 +221,14 @@ String GroqClient::chat(const String &prompt)
     {
         handleApiFailure(httpCode, response, "Chat");
         https.end();
+        resumeAudioAfterApi();
         return "";
     }
 
     JsonDocument result;
     DeserializationError error = deserializeJson(result, response);
     https.end();
+    resumeAudioAfterApi();
 
     if (error)
     {
@@ -243,6 +265,9 @@ String GroqClient::speechToText(const char *wavFile)
         return "";
     }
 
+    // Pause I2S so TLS to Groq does not abort
+    pauseAudioForApi();
+
     const String boundary = "----ESP32GroqBoundary7MA4YWxk";
 
     String head;
@@ -250,7 +275,7 @@ String GroqClient::speechToText(const char *wavFile)
     head += "--";
     head += boundary;
     head += "\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n";
-    head += STT_MODEL;
+    head += GROQ_STT_MODEL;
     head += "\r\n--";
     head += boundary;
     head += "\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nen";
@@ -262,15 +287,30 @@ String GroqClient::speechToText(const char *wavFile)
     const String tail = "\r\n--" + boundary + "--\r\n";
     const size_t contentLength = head.length() + fileSize + tail.length();
 
+    Serial.printf("Groq STT -> %s model=%s (%u bytes)\n",
+                  AI_HOST, GROQ_STT_MODEL, (unsigned)fileSize);
+
     WiFiClientSecure client;
     client.setInsecure();
     client.setTimeout(HTTPS_TIMEOUT / 1000);
 
-    Serial.printf("Groq STT -> %s (%u bytes)\n", AI_HOST, (unsigned)fileSize);
-    if (!client.connect(AI_HOST, AI_PORT))
+    bool connected = false;
+    for (int attempt = 1; attempt <= 3; attempt++)
+    {
+        Serial.printf("STT TLS connect attempt %d/3...\n", attempt);
+        if (client.connect(AI_HOST, AI_PORT))
+        {
+            connected = true;
+            break;
+        }
+        delay(400 * attempt);
+    }
+
+    if (!connected)
     {
         Serial.println("STT connect to api.groq.com failed");
         file.close();
+        resumeAudioAfterApi();
         return "";
     }
 
@@ -292,12 +332,19 @@ String GroqClient::speechToText(const char *wavFile)
     while (file.available())
     {
         size_t n = file.read(buffer, sizeof(buffer));
-        if (client.write(buffer, n) != n)
+        size_t written = 0;
+        while (written < n)
         {
-            Serial.println("STT upload stalled");
-            file.close();
-            client.stop();
-            return "";
+            size_t w = client.write(buffer + written, n - written);
+            if (w == 0)
+            {
+                Serial.println("STT upload stalled");
+                file.close();
+                client.stop();
+                resumeAudioAfterApi();
+                return "";
+            }
+            written += w;
         }
     }
     file.close();
@@ -308,11 +355,13 @@ String GroqClient::speechToText(const char *wavFile)
     {
         Serial.println("STT response headers incomplete");
         client.stop();
+        resumeAudioAfterApi();
         return "";
     }
 
     String response = readRemainingBody(client);
     client.stop();
+    resumeAudioAfterApi();
 
     if (httpStatus != 200)
     {
@@ -349,6 +398,8 @@ bool GroqClient::textToSpeech(const String &text, const char *outputFile)
     }
 
     const String key = groqApiKey();
+    pauseAudioForApi();
+
     WiFiClientSecure client;
     client.setInsecure();
     client.setTimeout(HTTPS_TIMEOUT / 1000);
@@ -356,10 +407,11 @@ bool GroqClient::textToSpeech(const String &text, const char *outputFile)
     HTTPClient https;
     https.setTimeout(HTTPS_TIMEOUT);
 
-    Serial.printf("Groq TTS -> %s\n", AI_TTS_URL);
+    Serial.printf("Groq TTS -> %s model=%s\n", AI_TTS_URL, GROQ_TTS_MODEL);
     if (!https.begin(client, AI_TTS_URL))
     {
         Serial.println("Unable to connect to Groq TTS API");
+        resumeAudioAfterApi();
         return false;
     }
 
@@ -367,9 +419,9 @@ bool GroqClient::textToSpeech(const String &text, const char *outputFile)
     https.addHeader("Authorization", "Bearer " + key);
 
     JsonDocument doc;
-    doc["model"] = TTS_MODEL;
+    doc["model"] = GROQ_TTS_MODEL;
     doc["input"] = text;
-    doc["voice"] = TTS_VOICE;
+    doc["voice"] = GROQ_TTS_VOICE;
     doc["response_format"] = "wav";
 
     String body;
@@ -380,6 +432,7 @@ bool GroqClient::textToSpeech(const String &text, const char *outputFile)
     {
         Serial.printf("TTS HTTP error: %s\n", https.errorToString(httpCode).c_str());
         https.end();
+        resumeAudioAfterApi();
         return false;
     }
 
@@ -387,10 +440,10 @@ bool GroqClient::textToSpeech(const String &text, const char *outputFile)
     {
         handleApiFailure(httpCode, https.getString(), "TTS");
         https.end();
+        resumeAudioAfterApi();
         return false;
     }
 
-    // Ensure parent FS is writable
     if (LittleFS.exists(outputFile))
     {
         LittleFS.remove(outputFile);
@@ -401,6 +454,7 @@ bool GroqClient::textToSpeech(const String &text, const char *outputFile)
     {
         Serial.println("Cannot create TTS output file on LittleFS");
         https.end();
+        resumeAudioAfterApi();
         return false;
     }
 
@@ -436,6 +490,7 @@ bool GroqClient::textToSpeech(const String &text, const char *outputFile)
 
     out.close();
     https.end();
+    resumeAudioAfterApi();
 
     Serial.printf("TTS saved %u bytes to %s\n", (unsigned)total, outputFile);
     return total > 44;
