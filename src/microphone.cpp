@@ -23,6 +23,7 @@ void Microphone::installI2S()
 
     i2s_pin_config_t pin_config =
     {
+        .mck_io_num = I2S_PIN_NO_CHANGE, // required on ESP32-S3 (was defaulting to GPIO0!)
         .bck_io_num = MIC_SCK,
         .ws_io_num = MIC_WS,
         .data_out_num = I2S_PIN_NO_CHANGE,

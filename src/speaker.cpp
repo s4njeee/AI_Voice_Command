@@ -25,10 +25,17 @@ bool Speaker::setSampleRate(uint32_t sampleRate)
         return true;
     }
 
-    esp_err_t err = i2s_set_sample_rates(SPK_I2S_PORT, sampleRate);
+    // On ESP32-S3, i2s_set_sample_rates() is unreliable — set full clock
+    esp_err_t err = i2s_set_clk(
+        SPK_I2S_PORT,
+        sampleRate,
+        I2S_BITS_PER_SAMPLE_32BIT,
+        I2S_CHANNEL_STEREO);
+
     if (err != ESP_OK)
     {
-        Serial.printf("Speaker sample rate %lu failed\n", (unsigned long)sampleRate);
+        Serial.printf("Speaker sample rate %lu failed (%d)\n",
+                      (unsigned long)sampleRate, (int)err);
         return false;
     }
 
@@ -43,12 +50,13 @@ bool Speaker::begin()
         return true;
     }
 
-    // Stereo frames (L+R). MAX98357A is often silent on mono-only I2S.
+    // MAX98357A: 32-bit stereo slots, 16-bit PCM in the high half.
+    // Missing mck_io_num on ESP32-S3 previously defaulted MCLK to GPIO0.
     i2s_config_t i2s_config =
     {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
@@ -61,6 +69,7 @@ bool Speaker::begin()
 
     i2s_pin_config_t pin_config =
     {
+        .mck_io_num = I2S_PIN_NO_CHANGE,
         .bck_io_num = SPK_BCLK,
         .ws_io_num = SPK_LRC,
         .data_out_num = SPK_DIN,
@@ -70,23 +79,30 @@ bool Speaker::begin()
     esp_err_t err = i2s_driver_install(SPK_I2S_PORT, &i2s_config, 0, NULL);
     if (err != ESP_OK)
     {
-        Serial.println("Speaker I2S install failed");
+        Serial.printf("Speaker I2S install failed (%d)\n", (int)err);
         return false;
     }
 
     err = i2s_set_pin(SPK_I2S_PORT, &pin_config);
     if (err != ESP_OK)
     {
-        Serial.println("Speaker pin config failed");
+        Serial.printf("Speaker pin config failed (%d)\n", (int)err);
         i2s_driver_uninstall(SPK_I2S_PORT);
         return false;
     }
 
     i2s_zero_dma_buffer(SPK_I2S_PORT);
-    currentSampleRate = SAMPLE_RATE;
+    currentSampleRate = 0;
+    if (!setSampleRate(SAMPLE_RATE))
+    {
+        i2s_driver_uninstall(SPK_I2S_PORT);
+        return false;
+    }
+
     started_ = true;
 
-    Serial.println("Speaker Ready");
+    Serial.printf("Speaker Ready (I2S1 BCLK=%d LRC=%d DIN=%d, 32-bit stereo)\n",
+                  SPK_BCLK, SPK_LRC, SPK_DIN);
     return true;
 }
 
@@ -97,8 +113,8 @@ bool Speaker::playPCM(const int16_t *buffer, size_t samples)
         return false;
     }
 
-    // Expand mono → stereo (L=R) for MAX98357A
-    int16_t stereo[256];
+    // Mono int16 -> stereo int32 frames (sample in upper 16 bits)
+    int32_t stereo[256];
     size_t done = 0;
 
     while (done < samples)
@@ -106,7 +122,7 @@ bool Speaker::playPCM(const int16_t *buffer, size_t samples)
         const size_t n = (samples - done > 128) ? 128 : (samples - done);
         for (size_t i = 0; i < n; i++)
         {
-            const int16_t s = buffer[done + i];
+            const int32_t s = ((int32_t)buffer[done + i]) << 16;
             stereo[i * 2] = s;
             stereo[i * 2 + 1] = s;
         }
@@ -115,12 +131,14 @@ bool Speaker::playPCM(const int16_t *buffer, size_t samples)
         esp_err_t err = i2s_write(
             SPK_I2S_PORT,
             stereo,
-            n * 2 * sizeof(int16_t),
+            n * 2 * sizeof(int32_t),
             &bytesWritten,
             portMAX_DELAY);
 
-        if (err != ESP_OK)
+        if (err != ESP_OK || bytesWritten == 0)
         {
+            Serial.printf("i2s_write failed err=%d written=%u\n",
+                          (int)err, (unsigned)bytesWritten);
             return false;
         }
         done += n;
@@ -154,7 +172,7 @@ bool Speaker::playTone(uint32_t freqHz, uint32_t durationMs)
         {
             const float t = (float)(produced + i) / (float)SAMPLE_RATE;
             // ~50% amplitude — loud enough to hear, not clipped
-            chunk[i] = (int16_t)(sinf(2.0f * 3.14159265f * (float)freqHz * t) * 16000.0f);
+            chunk[i] = (int16_t)(sinf(2.0f * 3.14159265f * (float)freqHz * t) * 28000.0f);
         }
         if (!playPCM(chunk, n))
         {
@@ -239,6 +257,11 @@ bool Speaker::playWavFile(const char *filename)
             break;
         }
 
+        // Guard against corrupt/huge chunk sizes
+        if (chunkSize > file.size())
+        {
+            break;
+        }
         file.seek(file.position() + chunkSize);
     }
 
@@ -247,6 +270,20 @@ bool Speaker::playWavFile(const char *filename)
         Serial.println("WAV data chunk not found");
         file.close();
         return false;
+    }
+
+    // Orpheus often sets data size to 0xFFFFFFFF (streaming). Use file length.
+    const size_t fileSize = file.size();
+    if (dataSize == 0 || dataSize == 0xFFFFFFFFu ||
+        (uint64_t)dataOffset + (uint64_t)dataSize > (uint64_t)fileSize)
+    {
+        if (fileSize <= dataOffset)
+        {
+            Serial.println("WAV data offset past EOF");
+            file.close();
+            return false;
+        }
+        dataSize = (uint32_t)(fileSize - dataOffset);
     }
 
     if (audioFormat != 1 || bitsPerSample != 16)
@@ -354,13 +391,23 @@ bool Speaker::playWavBuffer(const uint8_t *data, size_t length)
             break;
         }
 
+        if (chunkSize > length || pos + chunkSize > length)
+        {
+            break;
+        }
         pos += chunkSize;
     }
 
-    if (!foundData || dataOffset + dataSize > length)
+    if (!foundData || dataOffset >= length)
     {
         Serial.println("WAV data chunk missing in buffer");
         return false;
+    }
+
+    if (dataSize == 0 || dataSize == 0xFFFFFFFFu ||
+        dataOffset + dataSize > length)
+    {
+        dataSize = length - dataOffset;
     }
 
     if (audioFormat != 1 || bitsPerSample != 16)

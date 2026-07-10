@@ -6,7 +6,7 @@
 //======================================================
 
 #define PROJECT_NAME    "Smartcane AI Voice (Groq)"
-#define PROJECT_VERSION "3.5.1-GROQ"
+#define PROJECT_VERSION "3.5.2-GROQ"
 
 //======================================================
 // Wake Word
@@ -80,6 +80,10 @@
 //======================================================
 // MAX98357A Speaker (I2S1)
 //======================================================
+// Wiring: BCLK->48, LRC->47, DIN->45, VIN->3V3/5V, GND->GND
+// SD on amp: leave floating (stereo mix) — do NOT tie SD to GND (mute)
+// GPIO45 is an ESP32-S3 strapping pin; if still silent after 3.5.2,
+// move DIN wire to GPIO11 and set SPK_DIN to 11.
 
 #define SPK_I2S_PORT       I2S_NUM_1
 
