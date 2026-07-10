@@ -6,7 +6,7 @@
 //======================================================
 
 #define PROJECT_NAME    "Smartcane AI Voice (Groq)"
-#define PROJECT_VERSION "3.4.0-GROQ"
+#define PROJECT_VERSION "3.4.1-GROQ"
 
 //======================================================
 // Wake Word

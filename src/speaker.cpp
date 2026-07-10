@@ -369,38 +369,44 @@ bool Speaker::speakText(const String &text)
     microphone.end();
     delay(20);
 
-    Audio audio;
-    audio.setPinout(SPK_BCLK, SPK_LRC, SPK_DIN);
-    audio.setVolume(21);
-
-    Serial.println("Speaking on speaker (Google TTS fallback)...");
-    if (!audio.connecttospeech(clipped.c_str(), "en"))
+    bool ok = false;
     {
-        Serial.println("Google TTS failed to start");
-        begin();
-        microphone.begin();
-        return false;
-    }
+        // Destroy Audio BEFORE re-installing our I2S drivers (prevents crash)
+        Audio audio;
+        audio.setPinout(SPK_BCLK, SPK_LRC, SPK_DIN);
+        audio.setVolume(21);
 
-    const unsigned long start = millis();
-    while (audio.isRunning())
-    {
-        audio.loop();
-        if (millis() - start > 45000)
+        Serial.println("Speaking on speaker (Google TTS fallback)...");
+        if (!audio.connecttospeech(clipped.c_str(), "en"))
         {
-            Serial.println("TTS playback timeout");
-            break;
+            Serial.println("Google TTS failed to start");
         }
-        delay(1);
+        else
+        {
+            const unsigned long start = millis();
+            while (audio.isRunning())
+            {
+                audio.loop();
+                if (millis() - start > 45000)
+                {
+                    Serial.println("TTS playback timeout");
+                    break;
+                }
+                delay(1);
+            }
+            audio.stopSong();
+            ok = true;
+        }
     }
 
-    audio.stopSong();
-    delay(30);
-
+    delay(50);
     begin();
     microphone.begin();
-    Serial.println("Speaker playback done");
-    return true;
+    if (ok)
+    {
+        Serial.println("Speaker playback done");
+    }
+    return ok;
 }
 
 void Speaker::stop()

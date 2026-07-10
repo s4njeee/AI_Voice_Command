@@ -213,54 +213,75 @@ bool GroqClient::fetchSpeechWav(const String &text, uint8_t **outData, size_t *o
     const String key = groqApiKey();
     pauseAudioForApi();
 
-    WiFiClientSecure client;
-    client.setInsecure();
-    client.setTimeout(HTTPS_TIMEOUT / 1000);
-
-    HTTPClient https;
-    https.setTimeout(HTTPS_TIMEOUT);
-
-    Serial.printf("Orpheus TTS voice=%s model=%s\n", GROQ_TTS_VOICE, GROQ_TTS_MODEL);
-    Serial.printf("Orpheus text: %s\n", clipped.c_str());
-
-    if (!https.begin(client, AI_TTS_URL))
-    {
-        Serial.println("Unable to connect to Groq TTS API");
-        resumeAudioAfterApi();
-        return false;
-    }
-
-    https.addHeader("Content-Type", "application/json");
-    https.addHeader("Authorization", "Bearer " + key);
-
     JsonDocument doc;
     doc["model"] = GROQ_TTS_MODEL;
     doc["input"] = clipped;
     doc["voice"] = GROQ_TTS_VOICE;
     doc["response_format"] = "wav";
 
-    String body;
-    serializeJson(doc, body);
+    String reqBody;
+    serializeJson(doc, reqBody);
 
-    int httpCode = https.POST(body);
-    if (httpCode <= 0)
+    Serial.printf("Orpheus TTS voice=%s model=%s\n", GROQ_TTS_VOICE, GROQ_TTS_MODEL);
+    Serial.printf("Orpheus text: %s\n", clipped.c_str());
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(HTTPS_TIMEOUT / 1000);
+
+    if (!client.connect(AI_HOST, AI_PORT))
     {
-        Serial.printf("TTS HTTP error: %s\n", https.errorToString(httpCode).c_str());
-        https.end();
+        Serial.println("Orpheus TLS connect failed");
         resumeAudioAfterApi();
         return false;
     }
 
-    if (httpCode != 200)
+    client.print("POST /openai/v1/audio/speech HTTP/1.1\r\n");
+    client.print("Host: ");
+    client.print(AI_HOST);
+    client.print("\r\n");
+    client.print("Authorization: Bearer ");
+    client.print(key);
+    client.print("\r\n");
+    client.print("Content-Type: application/json\r\n");
+    client.printf("Content-Length: %u\r\n", (unsigned)reqBody.length());
+    client.print("Connection: close\r\n\r\n");
+    client.print(reqBody);
+
+    int httpStatus = 0;
+    int contentLength = -1;
+    bool chunked = false;
+
+    String statusLine = client.readStringUntil('\n');
+    statusLine.trim();
+    int sp1 = statusLine.indexOf(' ');
+    int sp2 = statusLine.indexOf(' ', sp1 + 1);
+    if (sp1 > 0 && sp2 > sp1)
     {
-        handleApiFailure(httpCode, https.getString(), "TTS");
-        https.end();
-        resumeAudioAfterApi();
-        return false;
+        httpStatus = statusLine.substring(sp1 + 1, sp2).toInt();
     }
 
-    const int contentLength = https.getSize();
-    size_t capacity = contentLength > 0 ? (size_t)contentLength + 16 : 64 * 1024;
+    while (client.connected() || client.available())
+    {
+        String line = client.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0)
+        {
+            break;
+        }
+        String lower = line;
+        lower.toLowerCase();
+        if (lower.startsWith("content-length:"))
+        {
+            contentLength = lower.substring(15).toInt();
+        }
+        else if (lower.startsWith("transfer-encoding:") && lower.indexOf("chunked") >= 0)
+        {
+            chunked = true;
+        }
+    }
+
+    size_t capacity = contentLength > 0 ? (size_t)contentLength + 8 : 256 * 1024;
     uint8_t *buffer = (uint8_t *)ps_malloc(capacity);
     if (!buffer)
     {
@@ -269,65 +290,175 @@ bool GroqClient::fetchSpeechWav(const String &text, uint8_t **outData, size_t *o
     if (!buffer)
     {
         Serial.println("Out of memory for Orpheus WAV");
-        https.end();
+        client.stop();
         resumeAudioAfterApi();
         return false;
     }
 
-    WiFiClient *stream = https.getStreamPtr();
     size_t total = 0;
     unsigned long lastData = millis();
 
-    while (https.connected() || stream->available())
+    auto appendBytes = [&](const uint8_t *src, size_t n) -> bool
     {
-        size_t avail = stream->available();
-        if (avail == 0)
+        if (total + n > capacity)
         {
-            if (millis() - lastData > 5000)
-            {
-                break;
-            }
-            delay(1);
-            continue;
-        }
-
-        if (total + avail > capacity)
-        {
-            size_t newCap = capacity * 2;
-            while (total + avail > newCap)
+            size_t newCap = capacity;
+            while (total + n > newCap)
             {
                 newCap *= 2;
             }
             uint8_t *grown = (uint8_t *)realloc(buffer, newCap);
             if (!grown)
             {
-                Serial.println("Orpheus WAV grew too large");
-                free(buffer);
-                https.end();
-                resumeAudioAfterApi();
                 return false;
             }
             buffer = grown;
             capacity = newCap;
         }
-
-        int n = stream->readBytes(buffer + total, avail);
-        if (n <= 0)
-        {
-            break;
-        }
+        memcpy(buffer + total, src, n);
         total += n;
-        lastData = millis();
+        return true;
+    };
+
+    if (chunked)
+    {
+        while (client.connected() || client.available())
+        {
+            String lenLine = client.readStringUntil('\n');
+            lenLine.trim();
+            if (lenLine.length() == 0)
+            {
+                continue;
+            }
+            const int chunkLen = (int)strtol(lenLine.c_str(), nullptr, 16);
+            if (chunkLen <= 0)
+            {
+                break;
+            }
+
+            size_t got = 0;
+            while ((int)got < chunkLen)
+            {
+                if (!client.available())
+                {
+                    if (!client.connected())
+                    {
+                        break;
+                    }
+                    delay(1);
+                    continue;
+                }
+                uint8_t tmp[512];
+                size_t want = chunkLen - got;
+                if (want > sizeof(tmp))
+                {
+                    want = sizeof(tmp);
+                }
+                int n = client.readBytes(tmp, want);
+                if (n <= 0)
+                {
+                    break;
+                }
+                if (!appendBytes(tmp, n))
+                {
+                    Serial.println("Orpheus WAV grew too large");
+                    free(buffer);
+                    client.stop();
+                    resumeAudioAfterApi();
+                    return false;
+                }
+                got += n;
+                lastData = millis();
+            }
+            client.readStringUntil('\n'); // trailing CRLF
+        }
+    }
+    else
+    {
+        while ((contentLength < 0 || (int)total < contentLength) &&
+               (client.connected() || client.available() || millis() - lastData < 5000))
+        {
+            if (!client.available())
+            {
+                delay(1);
+                if (!client.connected() && !client.available())
+                {
+                    break;
+                }
+                continue;
+            }
+
+            uint8_t tmp[1024];
+            int n = client.readBytes(tmp, sizeof(tmp));
+            if (n <= 0)
+            {
+                break;
+            }
+            if (!appendBytes(tmp, n))
+            {
+                Serial.println("Orpheus WAV grew too large");
+                free(buffer);
+                client.stop();
+                resumeAudioAfterApi();
+                return false;
+            }
+            lastData = millis();
+        }
     }
 
-    https.end();
+    client.stop();
     resumeAudioAfterApi();
 
-    if (total < 44)
+    if (httpStatus != 200)
     {
-        Serial.println("Orpheus returned empty audio");
+        String err;
+        err.reserve(total + 1);
+        for (size_t i = 0; i < total && i < 500; i++)
+        {
+            err += (char)buffer[i];
+        }
+        free(buffer);
+        handleApiFailure(httpStatus, err, "TTS");
+        return false;
+    }
+
+    // Find RIFF header (some proxies/prefixes can appear before it)
+    size_t riffAt = SIZE_MAX;
+    for (size_t i = 0; i + 12 < total; i++)
+    {
+        if (buffer[i] == 'R' && buffer[i + 1] == 'I' && buffer[i + 2] == 'F' && buffer[i + 3] == 'F' &&
+            buffer[i + 8] == 'W' && buffer[i + 9] == 'A' && buffer[i + 10] == 'V' && buffer[i + 11] == 'E')
+        {
+            riffAt = i;
+            break;
+        }
+    }
+
+    Serial.printf("Orpheus download %u bytes, status=%d, head=%02X %02X %02X %02X\n",
+                  (unsigned)total, httpStatus,
+                  total > 0 ? buffer[0] : 0,
+                  total > 1 ? buffer[1] : 0,
+                  total > 2 ? buffer[2] : 0,
+                  total > 3 ? buffer[3] : 0);
+
+    if (riffAt == SIZE_MAX)
+    {
+        Serial.println("Orpheus body is not WAV (no RIFF). First bytes as text:");
+        for (size_t i = 0; i < total && i < 120; i++)
+        {
+            char c = (char)buffer[i];
+            Serial.print((c >= 32 && c < 127) ? c : '.');
+        }
+        Serial.println();
         free(buffer);
         return false;
+    }
+
+    if (riffAt > 0)
+    {
+        Serial.printf("Skipping %u prefix bytes before RIFF\n", (unsigned)riffAt);
+        memmove(buffer, buffer + riffAt, total - riffAt);
+        total -= riffAt;
     }
 
     *outData = buffer;

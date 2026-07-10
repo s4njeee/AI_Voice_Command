@@ -52,6 +52,12 @@ bool Microphone::readSamples(
     size_t samples,
     size_t &samplesRead)
 {
+    if (!started_)
+    {
+        samplesRead = 0;
+        return false;
+    }
+
     size_t bytesRead = 0;
     static int32_t rawBuffer[512];
 
