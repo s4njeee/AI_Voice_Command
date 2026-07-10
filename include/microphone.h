@@ -23,6 +23,7 @@ public:
 
 private:
     void installI2S();
+    bool started_ = false;
 };
 
 extern Microphone microphone;

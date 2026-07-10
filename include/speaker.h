@@ -14,8 +14,10 @@ public:
     bool playWavFile(const char *filename);
 
     void stop();
+    void end();
 
 private:
+    bool started_ = false;
     bool setSampleRate(uint32_t sampleRate);
     uint32_t currentSampleRate = 0;
 };

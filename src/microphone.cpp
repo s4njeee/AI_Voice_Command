@@ -36,7 +36,13 @@ void Microphone::installI2S()
 
 bool Microphone::begin()
 {
+    if (started_)
+    {
+        return true;
+    }
+
     installI2S();
+    started_ = true;
     Serial.println("INMP441 Initialized");
     return true;
 }
@@ -143,5 +149,11 @@ bool Microphone::waitForSpeech(uint32_t timeoutMs)
 
 void Microphone::end()
 {
+    if (!started_)
+    {
+        return;
+    }
+
     i2s_driver_uninstall(MIC_I2S_PORT);
+    started_ = false;
 }

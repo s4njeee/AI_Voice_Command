@@ -1,28 +1,19 @@
 #ifndef SECRETS_H
 #define SECRETS_H
 
-//======================================================
-// Wi-Fi Credentials
-//======================================================
-
 #define WIFI_SSID      "YOUR_WIFI_SSID"
 #define WIFI_PASSWORD  "YOUR_WIFI_PASSWORD"
 
-//======================================================
-// OpenAI API Key
-//======================================================
-// Get your API key from:
-// https://platform.openai.com/api-keys
+// Free key from https://console.groq.com/keys
+#define GROQ_API_KEY "gsk_xxxxxxxx"
 
-#define OPENAI_API_KEY "sk-your-openai-api-key"
+#ifndef AI_API_KEY
+#define AI_API_KEY GROQ_API_KEY
+#endif
 
-//======================================================
-// OpenAI Models
-//======================================================
-
-#define STT_MODEL "whisper-1"
-#define CHAT_MODEL "gpt-4o-mini"
-#define TTS_MODEL "tts-1"
-#define TTS_VOICE "alloy"
+#define STT_MODEL  "whisper-large-v3-turbo"
+#define CHAT_MODEL "llama-3.1-8b-instant"
+#define TTS_MODEL  "canopylabs/orpheus-v1-english"
+#define TTS_VOICE  "austin"
 
 #endif

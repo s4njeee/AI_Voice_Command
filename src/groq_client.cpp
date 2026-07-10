@@ -1,4 +1,4 @@
-#include "openai.h"
+#include "groq_client.h"
 #include "config.h"
 #include "secrets.h"
 
@@ -7,15 +7,68 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 
-OpenAI openai;
+GroqClient groq;
 
-bool OpenAI::begin()
+// Resolve key from whichever name the user filled in
+static String groqApiKey()
 {
-    Serial.println("OpenAI client ready");
+#if defined(GROQ_API_KEY)
+    String key = GROQ_API_KEY;
+    if (key.length() > 10 && key.indexOf("PASTE_") < 0 && key.indexOf("your_") < 0)
+    {
+        return key;
+    }
+#endif
+#if defined(AI_API_KEY)
+    return String(AI_API_KEY);
+#else
+    return String("");
+#endif
+}
+
+void GroqClient::handleApiFailure(int httpStatus, const String &body, const char *where)
+{
+    Serial.printf("%s failed HTTP %d\n", where, httpStatus);
+
+    if (httpStatus == 401)
+    {
+        Serial.println("Groq rejected the API key.");
+        Serial.println("1. Open https://console.groq.com/keys");
+        Serial.println("2. Create a key starting with gsk_");
+        Serial.println("3. Put it in include/secrets.h as GROQ_API_KEY");
+        Serial.println("4. Build + Upload again (reboot alone is not enough)");
+    }
+    else if (httpStatus == 429 || body.indexOf("rate_limit") >= 0)
+    {
+        quotaBlocked_ = true;
+        Serial.println("Groq free-tier rate limit hit. Wait ~1 minute, then reboot.");
+    }
+
+    if (body.length() > 0 && body.length() < 600)
+    {
+        Serial.println(body);
+    }
+}
+
+bool GroqClient::begin()
+{
+    const String key = groqApiKey();
+    if (key.length() < 20 || key.indexOf("PASTE_") >= 0 || !key.startsWith("gsk_"))
+    {
+        Serial.println("========================================");
+        Serial.println("GROQ KEY MISSING OR INVALID");
+        Serial.println("Edit include/secrets.h:");
+        Serial.println("  #define GROQ_API_KEY \"gsk_...\"");
+        Serial.println("Then PlatformIO: Build + Upload");
+        Serial.println("========================================");
+    }
+
+    Serial.println("Groq AI client ready (api.groq.com)");
+    Serial.printf("STT=%s  CHAT=%s  TTS=%s\n", STT_MODEL, CHAT_MODEL, TTS_MODEL);
     return true;
 }
 
-bool OpenAI::ensurePromptAudio(const char *outputFile)
+bool GroqClient::ensurePromptAudio(const char *outputFile)
 {
     if (LittleFS.exists(outputFile))
     {
@@ -30,10 +83,16 @@ bool OpenAI::ensurePromptAudio(const char *outputFile)
         {
             existing.close();
         }
+        LittleFS.remove(outputFile);
     }
 
-    Serial.println("Generating Smartcane greeting...");
-    return textToSpeech(PROMPT_TEXT, outputFile);
+    Serial.println("Generating Smartcane greeting via Groq TTS...");
+    if (!textToSpeech(PROMPT_TEXT, outputFile))
+    {
+        Serial.println("Greeting TTS skipped (will print text instead when woken).");
+        return false;
+    }
+    return true;
 }
 
 static bool skipHttpHeaders(WiFiClientSecure &client, int &httpStatus)
@@ -86,8 +145,9 @@ static String readRemainingBody(WiFiClientSecure &client)
     return body;
 }
 
-String OpenAI::chat(const String &prompt)
+String GroqClient::chat(const String &prompt)
 {
+    const String key = groqApiKey();
     WiFiClientSecure client;
     client.setInsecure();
     client.setTimeout(HTTPS_TIMEOUT / 1000);
@@ -95,19 +155,18 @@ String OpenAI::chat(const String &prompt)
     HTTPClient https;
     https.setTimeout(HTTPS_TIMEOUT);
 
-    // Chat Completions is simpler/faster to parse than Responses API
-    if (!https.begin(client, "https://api.openai.com/v1/chat/completions"))
+    if (!https.begin(client, AI_CHAT_URL))
     {
-        Serial.println("Unable to connect to OpenAI chat API");
+        Serial.println("Unable to connect to Groq chat API");
         return "";
     }
 
     https.addHeader("Content-Type", "application/json");
-    https.addHeader("Authorization", "Bearer " + String(OPENAI_API_KEY));
+    https.addHeader("Authorization", "Bearer " + key);
 
     JsonDocument doc;
     doc["model"] = CHAT_MODEL;
-    doc["temperature"] = 0;
+    doc["temperature"] = 0.2;
     doc["max_tokens"] = 120;
 
     JsonArray messages = doc["messages"].to<JsonArray>();
@@ -126,6 +185,7 @@ String OpenAI::chat(const String &prompt)
     String body;
     serializeJson(doc, body);
 
+    Serial.println("Groq chat...");
     int httpCode = https.POST(body);
     if (httpCode <= 0)
     {
@@ -139,7 +199,7 @@ String OpenAI::chat(const String &prompt)
 
     if (httpCode != 200)
     {
-        Serial.println(response);
+        handleApiFailure(httpCode, response, "Chat");
         https.end();
         return "";
     }
@@ -156,7 +216,7 @@ String OpenAI::chat(const String &prompt)
 
     if (result["error"].is<JsonObject>())
     {
-        Serial.println(result["error"]["message"].as<String>());
+        handleApiFailure(httpCode, response, "Chat");
         return "";
     }
 
@@ -165,8 +225,9 @@ String OpenAI::chat(const String &prompt)
     return answer;
 }
 
-String OpenAI::speechToText(const char *wavFile)
+String GroqClient::speechToText(const char *wavFile)
 {
+    const String key = groqApiKey();
     File file = LittleFS.open(wavFile, FILE_READ);
     if (!file)
     {
@@ -182,7 +243,7 @@ String OpenAI::speechToText(const char *wavFile)
         return "";
     }
 
-    const String boundary = "----ESP32VoiceBoundary7MA4YWxk";
+    const String boundary = "----ESP32GroqBoundary7MA4YWxk";
 
     String head;
     head.reserve(320);
@@ -205,18 +266,24 @@ String OpenAI::speechToText(const char *wavFile)
     client.setInsecure();
     client.setTimeout(HTTPS_TIMEOUT / 1000);
 
-    Serial.println("Transcribing...");
-    if (!client.connect(OPENAI_HOST, OPENAI_PORT))
+    Serial.printf("Groq STT -> %s (%u bytes)\n", AI_HOST, (unsigned)fileSize);
+    if (!client.connect(AI_HOST, AI_PORT))
     {
-        Serial.println("STT connect failed");
+        Serial.println("STT connect to api.groq.com failed");
         file.close();
         return "";
     }
 
-    client.printf("POST /v1/audio/transcriptions HTTP/1.1\r\n");
-    client.printf("Host: %s\r\n", OPENAI_HOST);
-    client.printf("Authorization: Bearer %s\r\n", OPENAI_API_KEY);
-    client.printf("Content-Type: multipart/form-data; boundary=%s\r\n", boundary.c_str());
+    client.print("POST /openai/v1/audio/transcriptions HTTP/1.1\r\n");
+    client.print("Host: ");
+    client.print(AI_HOST);
+    client.print("\r\n");
+    client.print("Authorization: Bearer ");
+    client.print(key);
+    client.print("\r\n");
+    client.print("Content-Type: multipart/form-data; boundary=");
+    client.print(boundary);
+    client.print("\r\n");
     client.printf("Content-Length: %u\r\n", (unsigned)contentLength);
     client.print("Connection: close\r\n\r\n");
     client.print(head);
@@ -249,8 +316,7 @@ String OpenAI::speechToText(const char *wavFile)
 
     if (httpStatus != 200)
     {
-        Serial.printf("STT failed HTTP %d\n", httpStatus);
-        Serial.println(response);
+        handleApiFailure(httpStatus, response, "STT");
         return "";
     }
 
@@ -275,13 +341,14 @@ String OpenAI::speechToText(const char *wavFile)
     return text;
 }
 
-bool OpenAI::textToSpeech(const String &text, const char *outputFile)
+bool GroqClient::textToSpeech(const String &text, const char *outputFile)
 {
     if (text.length() == 0)
     {
         return false;
     }
 
+    const String key = groqApiKey();
     WiFiClientSecure client;
     client.setInsecure();
     client.setTimeout(HTTPS_TIMEOUT / 1000);
@@ -289,21 +356,21 @@ bool OpenAI::textToSpeech(const String &text, const char *outputFile)
     HTTPClient https;
     https.setTimeout(HTTPS_TIMEOUT);
 
-    if (!https.begin(client, "https://api.openai.com/v1/audio/speech"))
+    Serial.printf("Groq TTS -> %s\n", AI_TTS_URL);
+    if (!https.begin(client, AI_TTS_URL))
     {
-        Serial.println("Unable to connect to OpenAI TTS API");
+        Serial.println("Unable to connect to Groq TTS API");
         return false;
     }
 
     https.addHeader("Content-Type", "application/json");
-    https.addHeader("Authorization", "Bearer " + String(OPENAI_API_KEY));
+    https.addHeader("Authorization", "Bearer " + key);
 
     JsonDocument doc;
     doc["model"] = TTS_MODEL;
     doc["input"] = text;
     doc["voice"] = TTS_VOICE;
     doc["response_format"] = "wav";
-    doc["speed"] = 1.15;
 
     String body;
     serializeJson(doc, body);
@@ -318,16 +385,21 @@ bool OpenAI::textToSpeech(const String &text, const char *outputFile)
 
     if (httpCode != 200)
     {
-        Serial.printf("TTS failed HTTP %d\n", httpCode);
-        Serial.println(https.getString());
+        handleApiFailure(httpCode, https.getString(), "TTS");
         https.end();
         return false;
+    }
+
+    // Ensure parent FS is writable
+    if (LittleFS.exists(outputFile))
+    {
+        LittleFS.remove(outputFile);
     }
 
     File out = LittleFS.open(outputFile, FILE_WRITE);
     if (!out)
     {
-        Serial.println("Cannot create TTS output file");
+        Serial.println("Cannot create TTS output file on LittleFS");
         https.end();
         return false;
     }

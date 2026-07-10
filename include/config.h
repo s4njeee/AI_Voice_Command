@@ -5,8 +5,8 @@
 // Project Information
 //======================================================
 
-#define PROJECT_NAME    "Smartcane AI Voice"
-#define PROJECT_VERSION "2.0.0"
+#define PROJECT_NAME    "Smartcane AI Voice (Groq)"
+#define PROJECT_VERSION "3.0.0-GROQ"
 
 //======================================================
 // Wake Word
@@ -18,14 +18,16 @@
 // WiFi
 //======================================================
 
-#define WIFI_TIMEOUT 20000
+#define WIFI_TIMEOUT 45000
 
 //======================================================
-// OpenAI
+// AI provider (Groq — free tier, OpenAI-compatible)
 //======================================================
 
-#define OPENAI_HOST "api.openai.com"
-#define OPENAI_PORT 443
+#define AI_HOST "api.groq.com"
+#define AI_PORT 443
+#define AI_CHAT_URL "https://api.groq.com/openai/v1/chat/completions"
+#define AI_TTS_URL  "https://api.groq.com/openai/v1/audio/speech"
 
 //======================================================
 // Audio Configuration
@@ -45,7 +47,10 @@
 #define SILENCE_END_MS     800
 
 // Voice activity threshold (raise if false triggers, lower if misses speech)
-#define VAD_THRESHOLD      600
+#define VAD_THRESHOLD      1800
+
+// After a failed Groq call, wait before trying STT again (saves quota)
+#define API_ERROR_COOLDOWN_MS 15000
 
 #define AUDIO_BUFFER_SIZE  1024
 

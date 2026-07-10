@@ -5,7 +5,7 @@
 #include "wifi_manager.h"
 #include "microphone.h"
 #include "speaker.h"
-#include "openai.h"
+#include "groq_client.h"
 #include "wav.h"
 
 int16_t audioBuffer[512];
@@ -34,7 +34,7 @@ static String normalizeText(String text)
         }
         else if (c == '-' || c == '_' || c == '\'')
         {
-            // drop separators so "smart-cane" -> "smartcane" after space collapse
+            // drop separators so "smart-cane" -> "smartcane"
         }
         else
         {
@@ -51,7 +51,6 @@ static bool containsWakeWord(const String &text)
 {
     const String norm = normalizeText(text);
 
-    // Common STT variants of "Smartcane"
     const char *variants[] = {
         "smartcane",
         "smartcan",
@@ -70,7 +69,6 @@ static bool containsWakeWord(const String &text)
         }
     }
 
-    // "smart cane" with space kept as smartcane after normalizeText space strip
     return false;
 }
 
@@ -179,7 +177,7 @@ static bool handleCommand(const String &command)
     Serial.print("Command: ");
     Serial.println(command);
 
-    String reply = openai.chat(command);
+    String reply = groq.chat(command);
     if (reply.length() == 0)
     {
         Serial.println("Chat response failed.");
@@ -189,9 +187,9 @@ static bool handleCommand(const String &command)
     Serial.print("Smartcane: ");
     Serial.println(reply);
 
-    if (!openai.textToSpeech(reply, REPLY_FILE))
+    if (!groq.textToSpeech(reply, REPLY_FILE))
     {
-        Serial.println("Text-to-speech failed.");
+        Serial.println("TTS failed — printing reply only.");
         return false;
     }
 
@@ -207,6 +205,7 @@ void setup()
     Serial.println("====================================");
     Serial.println(PROJECT_NAME);
     Serial.println(PROJECT_VERSION);
+    Serial.println("Provider: Groq (api.groq.com)");
     Serial.println("Wake word: Smartcane");
     Serial.println("====================================");
 
@@ -217,18 +216,18 @@ void setup()
 
     if (!wifiManager.connected())
     {
-        Serial.println("WiFi required for OpenAI. Check secrets.h and reboot.");
+        Serial.println("WiFi required for Groq. Check secrets.h and reboot.");
     }
 
     microphone.begin();
     speaker.begin();
     wav.begin();
-    openai.begin();
+    groq.begin();
 
     if (wifiManager.connected())
     {
         setBusy(true);
-        openai.ensurePromptAudio(PROMPT_FILE);
+        groq.ensurePromptAudio(PROMPT_FILE);
         setBusy(false);
     }
 
@@ -247,7 +246,18 @@ void loop()
         return;
     }
 
-    // Always listening for speech energy — no BOOT button needed
+    if (groq.quotaBlocked())
+    {
+        static unsigned long lastWarn = 0;
+        if (millis() - lastWarn > 20000)
+        {
+            lastWarn = millis();
+            Serial.println("Paused: Groq rate limit. Wait, then reboot.");
+        }
+        delay(500);
+        return;
+    }
+
     if (!microphone.waitForSpeech(0))
     {
         return;
@@ -259,19 +269,25 @@ void loop()
     if (!recordSeconds(WAKE_SECONDS, false))
     {
         setBusy(false);
-        delay(200);
+        delay(API_ERROR_COOLDOWN_MS / 3);
         return;
     }
 
-    String heard = openai.speechToText(RECORD_FILE);
+    String heard = groq.speechToText(RECORD_FILE);
     Serial.print("Heard: ");
     Serial.println(heard.length() ? heard : "(empty)");
+
+    if (groq.quotaBlocked())
+    {
+        setBusy(false);
+        return;
+    }
 
     if (!containsWakeWord(heard))
     {
         Serial.println("Wake word not detected.");
         setBusy(false);
-        delay(150);
+        delay(800);
         return;
     }
 
@@ -279,11 +295,13 @@ void loop()
 
     String command = stripWakeWord(heard);
 
-    // If user only said the name, ask what they want (cached audio = fast)
     if (command.length() < 2)
     {
         Serial.println("Asking what the user wants...");
-        speaker.playWavFile(PROMPT_FILE);
+        if (!speaker.playWavFile(PROMPT_FILE))
+        {
+            Serial.println(PROMPT_TEXT);
+        }
 
         if (!microphone.waitForSpeech(6000))
         {
@@ -298,18 +316,17 @@ void loop()
             return;
         }
 
-        command = openai.speechToText(RECORD_FILE);
+        command = groq.speechToText(RECORD_FILE);
         if (command.length() == 0)
         {
             Serial.println("Could not understand command.");
             setBusy(false);
+            delay(API_ERROR_COOLDOWN_MS / 2);
             return;
         }
     }
 
     handleCommand(command);
     setBusy(false);
-
-    // Brief cooldown so playback echo does not re-trigger wake
-    delay(400);
+    delay(800);
 }

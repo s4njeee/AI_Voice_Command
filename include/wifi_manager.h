@@ -11,11 +11,19 @@ public:
     String ipAddress();
 
 private:
-    void connectBlocking(uint32_t timeoutMs);
+    bool connectOnce(uint32_t timeoutMs);
+    void hardResetRadio();
+    void scanAndDiagnose();
+    bool connectToBestMatch(uint32_t timeoutMs);
+    void onConnected();
+    void pauseAudioForWifi();
+    void resumeAudioAfterWifi();
     void printStatus();
+
     unsigned long disconnectSince_ = 0;
     unsigned long lastAttempt_ = 0;
     bool wasConnected_ = false;
+    bool audioPaused_ = false;
 };
 
 extern WiFiManagerESP wifiManager;

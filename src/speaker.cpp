@@ -31,6 +31,11 @@ bool Speaker::setSampleRate(uint32_t sampleRate)
 
 bool Speaker::begin()
 {
+    if (started_)
+    {
+        return true;
+    }
+
     i2s_config_t i2s_config =
     {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -75,6 +80,7 @@ bool Speaker::begin()
 
     i2s_zero_dma_buffer(SPK_I2S_PORT);
     currentSampleRate = SAMPLE_RATE;
+    started_ = true;
 
     Serial.println("Speaker Ready");
     return true;
@@ -236,5 +242,21 @@ bool Speaker::playWavFile(const char *filename)
 
 void Speaker::stop()
 {
-    i2s_zero_dma_buffer(SPK_I2S_PORT);
+    if (started_)
+    {
+        i2s_zero_dma_buffer(SPK_I2S_PORT);
+    }
+}
+
+void Speaker::end()
+{
+    if (!started_)
+    {
+        return;
+    }
+
+    i2s_driver_uninstall(SPK_I2S_PORT);
+    started_ = false;
+    currentSampleRate = 0;
+    Serial.println("Speaker stopped for WiFi");
 }
