@@ -13,6 +13,12 @@ public:
                      size_t samples,
                      size_t &samplesRead);
 
+    // Average absolute amplitude of one mic frame
+    uint32_t measureLevel();
+
+    // Block until speech energy is detected (or timeoutMs elapses)
+    bool waitForSpeech(uint32_t timeoutMs = 0);
+
     void end();
 
 private:

@@ -14,6 +14,9 @@ public:
 
     bool textToSpeech(const String &text,
                       const char *outputFile);
+
+    // Build greeting WAV once so wake responses are instant
+    bool ensurePromptAudio(const char *outputFile);
 };
 
 extern OpenAI openai;

@@ -5,8 +5,14 @@
 // Project Information
 //======================================================
 
-#define PROJECT_NAME    "ESP32 AI Voice Assistant"
-#define PROJECT_VERSION "1.0.0"
+#define PROJECT_NAME    "Smartcane AI Voice"
+#define PROJECT_VERSION "2.0.0"
+
+//======================================================
+// Wake Word
+//======================================================
+
+#define WAKE_WORD "smartcane"
 
 //======================================================
 // WiFi
@@ -29,8 +35,17 @@
 #define SAMPLE_BITS        16
 #define CHANNELS           1
 
-// Record 5 seconds
-#define RECORD_SECONDS     5
+// Short clip used to detect the wake word
+#define WAKE_SECONDS       2
+
+// Max length of a user command after wake
+#define COMMAND_SECONDS    4
+
+// Stop command recording after this much silence (ms)
+#define SILENCE_END_MS     800
+
+// Voice activity threshold (raise if false triggers, lower if misses speech)
+#define VAD_THRESHOLD      600
 
 #define AUDIO_BUFFER_SIZE  1024
 
@@ -55,13 +70,6 @@
 #define SPK_DIN            45
 
 //======================================================
-// Push Button
-//======================================================
-// Press to start recording
-
-#define BUTTON_PIN         0
-
-//======================================================
 // Status LED
 //======================================================
 
@@ -71,13 +79,17 @@
 // File Names
 //======================================================
 
-#define RECORD_FILE "/record.wav"
+#define RECORD_FILE  "/record.wav"
+#define REPLY_FILE   "/reply.wav"
+#define PROMPT_FILE  "/prompt.wav"
+
+#define PROMPT_TEXT  "Hi, I am Smartcane. What do you need?"
 
 //======================================================
 // HTTPS
 //======================================================
 
-#define HTTPS_TIMEOUT 30000
+#define HTTPS_TIMEOUT 25000
 
 //======================================================
 // Debug

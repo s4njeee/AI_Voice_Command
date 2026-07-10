@@ -1,4 +1,5 @@
 #include "wav.h"
+#include "config.h"
 
 #include <LittleFS.h>
 
@@ -60,11 +61,11 @@ bool WAV::create(const char *filename)
     memcpy(header.fmt, "fmt ", 4);
     header.subChunk1Size = 16;
     header.audioFormat = 1;
-    header.numChannels = 1;
-    header.sampleRate = 16000;
-    header.bitsPerSample = 16;
-    header.byteRate = 16000 * 1 * 16 / 8;
-    header.blockAlign = 1 * 16 / 8;
+    header.numChannels = CHANNELS;
+    header.sampleRate = SAMPLE_RATE;
+    header.bitsPerSample = SAMPLE_BITS;
+    header.byteRate = SAMPLE_RATE * CHANNELS * SAMPLE_BITS / 8;
+    header.blockAlign = CHANNELS * SAMPLE_BITS / 8;
 
     memcpy(header.data, "data", 4);
     header.subChunk2Size = 0;
@@ -104,11 +105,11 @@ bool WAV::close()
     memcpy(header.fmt, "fmt ", 4);
     header.subChunk1Size = 16;
     header.audioFormat = 1;
-    header.numChannels = 1;
-    header.sampleRate = 16000;
-    header.bitsPerSample = 16;
-    header.byteRate = 16000 * 2;
-    header.blockAlign = 2;
+    header.numChannels = CHANNELS;
+    header.sampleRate = SAMPLE_RATE;
+    header.bitsPerSample = SAMPLE_BITS;
+    header.byteRate = SAMPLE_RATE * CHANNELS * SAMPLE_BITS / 8;
+    header.blockAlign = CHANNELS * SAMPLE_BITS / 8;
 
     memcpy(header.data, "data", 4);
     header.subChunk2Size = dataSize;
