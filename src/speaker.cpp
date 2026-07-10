@@ -113,8 +113,8 @@ bool Speaker::playPCM(const int16_t *buffer, size_t samples)
         return false;
     }
 
-    // Mono int16 -> stereo int32 frames (sample in upper 16 bits)
-    int32_t stereo[256];
+    // Static — avoids stack overflow in loopTask during TTS
+    static int32_t stereo[256];
     size_t done = 0;
 
     while (done < samples)
@@ -722,13 +722,16 @@ bool Speaker::playMp3Buffer(const uint8_t *mp3, size_t len)
         begin();
     }
 
-    mp3dec_t dec;
+    // All large buffers are static — minimp3 on the stack overflows loopTask (~8KB)
+    static mp3dec_t dec;
+    static mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    static int16_t monoBuf[1152];
+
     mp3dec_init(&dec);
 
     size_t offset = 0;
     size_t frames = 0;
     int lastRate = 0;
-    mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 
     while (offset < len)
     {
@@ -765,11 +768,13 @@ bool Speaker::playMp3Buffer(const uint8_t *mp3, size_t len)
             lastRate = info.hz;
         }
 
-        // minimp3 returns interleaved stereo when channels==2
         if (info.channels == 2)
         {
-            const int mono = samples; // samples is per-channel count in minimp3
-            int16_t monoBuf[MINIMP3_MAX_SAMPLES_PER_FRAME];
+            const int mono = samples;
+            if (mono > 1152)
+            {
+                continue;
+            }
             for (int i = 0; i < mono; i++)
             {
                 monoBuf[i] = (int16_t)(((int32_t)pcm[i * 2] + pcm[i * 2 + 1]) / 2);
@@ -806,27 +811,31 @@ bool Speaker::speakText(const String &text)
     {
         clipped = text;
     }
-    if (clipped.length() > 160)
+    // Keep TTS short — smaller MP3, less RAM/CPU, fits Orpheus limit too
+    if (clipped.length() > 100)
     {
-        clipped = clipped.substring(0, 160);
+        clipped = clipped.substring(0, 97) + "...";
     }
 
     const String encoded = urlEncode(clipped);
     Serial.printf("Speaking (online TTS): %s\n", clipped.c_str());
 
-    // Keep mic quiet during download; keep our speaker driver (I2S1)
     microphone.end();
+    if (!started_)
+    {
+        begin();
+    }
     delay(20);
 
     uint8_t *mp3 = nullptr;
     size_t mp3Len = 0;
     bool ok = false;
 
-    // 1) Google Translate TTS
+    // Prefer StreamElements first (often smaller / more reliable than Google on ESP32)
     {
         const String path =
-            String("/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=") + encoded;
-        if (downloadUrl("translate.google.com", path, &mp3, &mp3Len))
+            String("/kappa/v2/speech?voice=Brian&text=") + encoded;
+        if (downloadUrl("api.streamelements.com", path, &mp3, &mp3Len))
         {
             ok = playMp3Buffer(mp3, mp3Len);
             free(mp3);
@@ -834,13 +843,12 @@ bool Speaker::speakText(const String &text)
         }
     }
 
-    // 2) StreamElements fallback (also free MP3)
     if (!ok)
     {
-        Serial.println("Google TTS failed — trying StreamElements...");
+        Serial.println("StreamElements TTS failed — trying Google...");
         const String path =
-            String("/kappa/v2/speech?voice=Brian&text=") + encoded;
-        if (downloadUrl("api.streamelements.com", path, &mp3, &mp3Len))
+            String("/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=") + encoded;
+        if (downloadUrl("translate.google.com", path, &mp3, &mp3Len))
         {
             ok = playMp3Buffer(mp3, mp3Len);
             free(mp3);

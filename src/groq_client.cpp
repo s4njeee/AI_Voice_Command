@@ -621,17 +621,17 @@ String GroqClient::chat(const String &prompt)
 
     JsonDocument doc;
     doc["model"] = GROQ_CHAT_MODEL;
-    doc["temperature"] = 0.2;
-    doc["max_tokens"] = 120;
+    doc["temperature"] = 0.1;
+    doc["max_tokens"] = 40;
 
     JsonArray messages = doc["messages"].to<JsonArray>();
 
     JsonObject systemMsg = messages.add<JsonObject>();
     systemMsg["role"] = "system";
     systemMsg["content"] =
-        "You are Smartcane, a helpful voice assistant. "
-        "Answer briefly in 1-2 short spoken sentences. "
-        "No markdown, lists, or special characters.";
+        "You are Smartcane, a voice assistant for a blind/low-vision user. "
+        "Reply in ONE short sentence, max 12 words. "
+        "No markdown, lists, questions, or filler.";
 
     JsonObject userMsg = messages.add<JsonObject>();
     userMsg["role"] = "user";
@@ -680,6 +680,11 @@ String GroqClient::chat(const String &prompt)
 
     String answer = result["choices"][0]["message"]["content"].as<String>();
     answer.trim();
+    // Hard cap for voice — long answers burn Orpheus TPD and crash TTS
+    if (answer.length() > 120)
+    {
+        answer = answer.substring(0, 117) + "...";
+    }
     return answer;
 }
 
@@ -707,7 +712,7 @@ String GroqClient::speechToText(const char *wavFile)
     const String boundary = "----ESP32GroqBoundary7MA4YWxk";
 
     String head;
-    head.reserve(320);
+    head.reserve(480);
     head += "--";
     head += boundary;
     head += "\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n";
@@ -715,6 +720,13 @@ String GroqClient::speechToText(const char *wavFile)
     head += "\r\n--";
     head += boundary;
     head += "\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nen";
+    head += "\r\n--";
+    head += boundary;
+    head += "\r\nContent-Disposition: form-data; name=\"temperature\"\r\n\r\n0";
+    head += "\r\n--";
+    head += boundary;
+    head += "\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n";
+    head += "Smartcane. Hey Smartcane. Voice commands for help, directions, time, weather.";
     head += "\r\n--";
     head += boundary;
     head += "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"record.wav\"\r\n";

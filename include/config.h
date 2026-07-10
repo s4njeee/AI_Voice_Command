@@ -6,7 +6,7 @@
 //======================================================
 
 #define PROJECT_NAME    "Smartcane AI Voice (Groq)"
-#define PROJECT_VERSION "3.5.2-GROQ"
+#define PROJECT_VERSION "3.5.3-GROQ"
 
 //======================================================
 // Wake Word
@@ -51,16 +51,16 @@
 #define CHANNELS           1
 
 // Short clip used to detect the wake word
-#define WAKE_SECONDS       2
+#define WAKE_SECONDS       3
 
 // Max length of a user command after wake
-#define COMMAND_SECONDS    4
+#define COMMAND_SECONDS    6
 
 // Stop command recording after this much silence (ms)
-#define SILENCE_END_MS     800
+#define SILENCE_END_MS     1000
 
 // Voice activity threshold (raise if false triggers, lower if misses speech)
-#define VAD_THRESHOLD      1800
+#define VAD_THRESHOLD      1500
 
 // After a failed Groq call, wait before trying STT again (saves quota)
 #define API_ERROR_COOLDOWN_MS 15000
@@ -80,16 +80,15 @@
 //======================================================
 // MAX98357A Speaker (I2S1)
 //======================================================
-// Wiring: BCLK->48, LRC->47, DIN->45, VIN->3V3/5V, GND->GND
-// SD on amp: leave floating (stereo mix) — do NOT tie SD to GND (mute)
-// GPIO45 is an ESP32-S3 strapping pin; if still silent after 3.5.2,
-// move DIN wire to GPIO11 and set SPK_DIN to 11.
+// Wiring: BCLK->48, LRC->47, DIN->11, VIN->3V3/5V, GND->GND
+// IMPORTANT: Do NOT use GPIO45 for DIN (ESP32-S3 strapping pin — often silent).
+// SD on amp: leave floating — do NOT tie SD to GND (mutes amp).
 
 #define SPK_I2S_PORT       I2S_NUM_1
 
 #define SPK_BCLK           48
 #define SPK_LRC            47
-#define SPK_DIN            45
+#define SPK_DIN            11
 
 //======================================================
 // Status LED
