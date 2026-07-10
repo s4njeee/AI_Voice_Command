@@ -4,7 +4,12 @@
 
 #include <driver/i2s.h>
 #include <LittleFS.h>
-#include "Audio.h"
+#include <WiFiClientSecure.h>
+#include <math.h>
+
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_ONLY_MP3
+#include "minimp3/minimp3.h"
 
 Speaker speaker;
 
@@ -23,7 +28,7 @@ bool Speaker::setSampleRate(uint32_t sampleRate)
     esp_err_t err = i2s_set_sample_rates(SPK_I2S_PORT, sampleRate);
     if (err != ESP_OK)
     {
-        Serial.printf("Speaker sample rate %lu failed\n", sampleRate);
+        Serial.printf("Speaker sample rate %lu failed\n", (unsigned long)sampleRate);
         return false;
     }
 
@@ -38,12 +43,13 @@ bool Speaker::begin()
         return true;
     }
 
+    // Stereo frames (L+R). MAX98357A is often silent on mono-only I2S.
     i2s_config_t i2s_config =
     {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = SAMPLE_RATE,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 8,
@@ -61,12 +67,7 @@ bool Speaker::begin()
         .data_in_num = I2S_PIN_NO_CHANGE
     };
 
-    esp_err_t err = i2s_driver_install(
-        SPK_I2S_PORT,
-        &i2s_config,
-        0,
-        NULL);
-
+    esp_err_t err = i2s_driver_install(SPK_I2S_PORT, &i2s_config, 0, NULL);
     if (err != ESP_OK)
     {
         Serial.println("Speaker I2S install failed");
@@ -77,6 +78,7 @@ bool Speaker::begin()
     if (err != ESP_OK)
     {
         Serial.println("Speaker pin config failed");
+        i2s_driver_uninstall(SPK_I2S_PORT);
         return false;
     }
 
@@ -90,24 +92,90 @@ bool Speaker::begin()
 
 bool Speaker::playPCM(const int16_t *buffer, size_t samples)
 {
-    if (buffer == nullptr || samples == 0)
+    if (!started_ || buffer == nullptr || samples == 0)
     {
         return false;
     }
 
-    size_t bytesWritten = 0;
-    esp_err_t err = i2s_write(
-        SPK_I2S_PORT,
-        buffer,
-        samples * sizeof(int16_t),
-        &bytesWritten,
-        portMAX_DELAY);
+    // Expand mono → stereo (L=R) for MAX98357A
+    int16_t stereo[256];
+    size_t done = 0;
 
-    return err == ESP_OK;
+    while (done < samples)
+    {
+        const size_t n = (samples - done > 128) ? 128 : (samples - done);
+        for (size_t i = 0; i < n; i++)
+        {
+            const int16_t s = buffer[done + i];
+            stereo[i * 2] = s;
+            stereo[i * 2 + 1] = s;
+        }
+
+        size_t bytesWritten = 0;
+        esp_err_t err = i2s_write(
+            SPK_I2S_PORT,
+            stereo,
+            n * 2 * sizeof(int16_t),
+            &bytesWritten,
+            portMAX_DELAY);
+
+        if (err != ESP_OK)
+        {
+            return false;
+        }
+        done += n;
+    }
+
+    return true;
+}
+
+bool Speaker::playTone(uint32_t freqHz, uint32_t durationMs)
+{
+    if (!started_)
+    {
+        begin();
+    }
+    if (!setSampleRate(SAMPLE_RATE) || freqHz == 0 || durationMs == 0)
+    {
+        return false;
+    }
+
+    const size_t totalSamples = (SAMPLE_RATE * durationMs) / 1000;
+    int16_t chunk[128];
+    size_t produced = 0;
+
+    Serial.printf("Speaker tone %lu Hz %lu ms\n",
+                  (unsigned long)freqHz, (unsigned long)durationMs);
+
+    while (produced < totalSamples)
+    {
+        const size_t n = (totalSamples - produced > 128) ? 128 : (totalSamples - produced);
+        for (size_t i = 0; i < n; i++)
+        {
+            const float t = (float)(produced + i) / (float)SAMPLE_RATE;
+            // ~50% amplitude — loud enough to hear, not clipped
+            chunk[i] = (int16_t)(sinf(2.0f * 3.14159265f * (float)freqHz * t) * 16000.0f);
+        }
+        if (!playPCM(chunk, n))
+        {
+            return false;
+        }
+        produced += n;
+    }
+
+    // brief silence to settle amp
+    memset(chunk, 0, sizeof(chunk));
+    playPCM(chunk, 128);
+    return true;
 }
 
 bool Speaker::playWavFile(const char *filename)
 {
+    if (!started_)
+    {
+        begin();
+    }
+
     File file = LittleFS.open(filename, FILE_READ);
     if (!file)
     {
@@ -146,7 +214,6 @@ bool Speaker::playWavFile(const char *filename)
         (header[27] << 24);
     uint16_t bitsPerSample = header[34] | (header[35] << 8);
 
-    // Find data chunk in case extra chunks exist before PCM data.
     uint32_t dataOffset = 12;
     uint32_t dataSize = 0;
     bool foundData = false;
@@ -197,7 +264,7 @@ bool Speaker::playWavFile(const char *filename)
     }
 
     Serial.printf("Playing %s (%lu Hz, %u ch, %lu bytes)\n",
-                  filename, sampleRate, numChannels, dataSize);
+                  filename, (unsigned long)sampleRate, numChannels, (unsigned long)dataSize);
 
     file.seek(dataOffset);
 
@@ -217,7 +284,6 @@ bool Speaker::playWavFile(const char *filename)
 
         if (numChannels == 2)
         {
-            // Downmix stereo to mono for MAX98357A left-only config.
             size_t monoSamples = samples / 2;
             for (size_t i = 0; i < monoSamples; i++)
             {
@@ -315,7 +381,7 @@ bool Speaker::playWavBuffer(const uint8_t *data, size_t length)
     }
 
     Serial.printf("Playing Orpheus WAV (%lu Hz, %u ch, %u bytes)\n",
-                  sampleRate, numChannels, (unsigned)dataSize);
+                  (unsigned long)sampleRate, numChannels, (unsigned)dataSize);
 
     size_t remaining = dataSize;
     size_t offset = dataOffset;
@@ -351,6 +417,336 @@ bool Speaker::playWavBuffer(const uint8_t *data, size_t length)
     return true;
 }
 
+static String plainTtsText(const String &text)
+{
+    String out;
+    out.reserve(text.length());
+    bool inBracket = false;
+    for (size_t i = 0; i < text.length(); i++)
+    {
+        const char c = text[i];
+        if (c == '[')
+        {
+            inBracket = true;
+            continue;
+        }
+        if (c == ']')
+        {
+            inBracket = false;
+            continue;
+        }
+        if (!inBracket)
+        {
+            out += c;
+        }
+    }
+    out.trim();
+    while (out.indexOf("  ") >= 0)
+    {
+        out.replace("  ", " ");
+    }
+    return out;
+}
+
+static String urlEncode(const String &in)
+{
+    String out;
+    out.reserve(in.length() * 3);
+    const char *hex = "0123456789ABCDEF";
+    for (size_t i = 0; i < in.length(); i++)
+    {
+        const uint8_t c = (uint8_t)in[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~')
+        {
+            out += (char)c;
+        }
+        else if (c == ' ')
+        {
+            out += "%20";
+        }
+        else
+        {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+bool Speaker::downloadUrl(const String &host, const String &path, uint8_t **out, size_t *outLen)
+{
+    *out = nullptr;
+    *outLen = 0;
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(20);
+
+    if (!client.connect(host.c_str(), 443))
+    {
+        Serial.printf("TTS TLS connect failed: %s\n", host.c_str());
+        return false;
+    }
+
+    client.print(String("GET ") + path + " HTTP/1.1\r\n");
+    client.print(String("Host: ") + host + "\r\n");
+    client.print("User-Agent: Mozilla/5.0 (ESP32) Smartcane/1.0\r\n");
+    client.print("Accept: audio/mpeg,audio/*;q=0.9,*/*;q=0.8\r\n");
+    client.print("Connection: close\r\n\r\n");
+
+    String statusLine = client.readStringUntil('\n');
+    statusLine.trim();
+    int httpStatus = 0;
+    int sp1 = statusLine.indexOf(' ');
+    int sp2 = statusLine.indexOf(' ', sp1 + 1);
+    if (sp1 > 0 && sp2 > sp1)
+    {
+        httpStatus = statusLine.substring(sp1 + 1, sp2).toInt();
+    }
+
+    int contentLength = -1;
+    bool chunked = false;
+    while (client.connected() || client.available())
+    {
+        String line = client.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0)
+        {
+            break;
+        }
+        String lower = line;
+        lower.toLowerCase();
+        if (lower.startsWith("content-length:"))
+        {
+            contentLength = lower.substring(15).toInt();
+        }
+        else if (lower.startsWith("transfer-encoding:") && lower.indexOf("chunked") >= 0)
+        {
+            chunked = true;
+        }
+    }
+
+    if (httpStatus != 200)
+    {
+        Serial.printf("TTS HTTP %d from %s\n", httpStatus, host.c_str());
+        client.stop();
+        return false;
+    }
+
+    // Use heap malloc (not ps_malloc) so realloc is safe on ESP32
+    size_t capacity = contentLength > 0 ? (size_t)contentLength + 16 : 64 * 1024;
+    if (capacity > 200 * 1024)
+    {
+        capacity = 200 * 1024;
+    }
+    uint8_t *buf = (uint8_t *)malloc(capacity);
+    if (!buf)
+    {
+        Serial.println("TTS: out of memory");
+        client.stop();
+        return false;
+    }
+
+    size_t total = 0;
+    auto append = [&](const uint8_t *src, size_t n) -> bool
+    {
+        if (total + n > capacity)
+        {
+            size_t newCap = capacity;
+            while (total + n > newCap)
+            {
+                newCap *= 2;
+            }
+            uint8_t *grown = (uint8_t *)realloc(buf, newCap);
+            if (!grown)
+            {
+                return false;
+            }
+            buf = grown;
+            capacity = newCap;
+        }
+        memcpy(buf + total, src, n);
+        total += n;
+        return true;
+    };
+
+    if (chunked)
+    {
+        while (client.connected() || client.available())
+        {
+            String lenLine = client.readStringUntil('\n');
+            lenLine.trim();
+            if (lenLine.length() == 0)
+            {
+                continue;
+            }
+            const int chunkLen = (int)strtol(lenLine.c_str(), nullptr, 16);
+            if (chunkLen <= 0)
+            {
+                break;
+            }
+            size_t got = 0;
+            while ((int)got < chunkLen)
+            {
+                if (!client.available())
+                {
+                    if (!client.connected())
+                    {
+                        break;
+                    }
+                    delay(1);
+                    continue;
+                }
+                uint8_t tmp[512];
+                size_t want = chunkLen - got;
+                if (want > sizeof(tmp))
+                {
+                    want = sizeof(tmp);
+                }
+                int n = client.readBytes(tmp, want);
+                if (n <= 0)
+                {
+                    break;
+                }
+                if (!append(tmp, n))
+                {
+                    free(buf);
+                    client.stop();
+                    return false;
+                }
+                got += n;
+            }
+            client.readStringUntil('\n');
+        }
+    }
+    else
+    {
+        unsigned long last = millis();
+        while ((contentLength < 0 || (int)total < contentLength) &&
+               (client.connected() || client.available() || millis() - last < 4000))
+        {
+            if (!client.available())
+            {
+                delay(1);
+                continue;
+            }
+            uint8_t tmp[1024];
+            int n = client.readBytes(tmp, sizeof(tmp));
+            if (n <= 0)
+            {
+                break;
+            }
+            if (!append(tmp, n))
+            {
+                free(buf);
+                client.stop();
+                return false;
+            }
+            last = millis();
+        }
+    }
+
+    client.stop();
+
+    if (total < 64)
+    {
+        Serial.printf("TTS body too small (%u)\n", (unsigned)total);
+        free(buf);
+        return false;
+    }
+
+    *out = buf;
+    *outLen = total;
+    Serial.printf("TTS downloaded %u bytes from %s\n", (unsigned)total, host.c_str());
+    return true;
+}
+
+bool Speaker::playMp3Buffer(const uint8_t *mp3, size_t len)
+{
+    if (mp3 == nullptr || len < 64)
+    {
+        return false;
+    }
+
+    if (!started_)
+    {
+        begin();
+    }
+
+    mp3dec_t dec;
+    mp3dec_init(&dec);
+
+    size_t offset = 0;
+    size_t frames = 0;
+    int lastRate = 0;
+    mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+
+    while (offset < len)
+    {
+        mp3dec_frame_info_t info;
+        memset(&info, 0, sizeof(info));
+        const int samples = mp3dec_decode_frame(
+            &dec,
+            mp3 + offset,
+            (int)(len - offset),
+            pcm,
+            &info);
+
+        if (info.frame_bytes > 0)
+        {
+            offset += (size_t)info.frame_bytes;
+        }
+        else
+        {
+            offset++;
+            continue;
+        }
+
+        if (samples <= 0)
+        {
+            continue;
+        }
+
+        if (info.hz > 0 && info.hz != lastRate)
+        {
+            if (!setSampleRate((uint32_t)info.hz))
+            {
+                return false;
+            }
+            lastRate = info.hz;
+        }
+
+        // minimp3 returns interleaved stereo when channels==2
+        if (info.channels == 2)
+        {
+            const int mono = samples; // samples is per-channel count in minimp3
+            int16_t monoBuf[MINIMP3_MAX_SAMPLES_PER_FRAME];
+            for (int i = 0; i < mono; i++)
+            {
+                monoBuf[i] = (int16_t)(((int32_t)pcm[i * 2] + pcm[i * 2 + 1]) / 2);
+            }
+            if (!playPCM(monoBuf, (size_t)mono))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (!playPCM(pcm, (size_t)samples))
+            {
+                return false;
+            }
+        }
+        frames++;
+    }
+
+    setSampleRate(SAMPLE_RATE);
+    Serial.printf("MP3 playback frames=%u\n", (unsigned)frames);
+    return frames > 0;
+}
+
 bool Speaker::speakText(const String &text)
 {
     if (text.length() == 0)
@@ -358,53 +754,65 @@ bool Speaker::speakText(const String &text)
         return false;
     }
 
-    String clipped = text;
-    if (clipped.length() > 180)
+    String clipped = plainTtsText(text);
+    if (clipped.length() == 0)
     {
-        clipped = clipped.substring(0, 180);
+        clipped = text;
+    }
+    if (clipped.length() > 160)
+    {
+        clipped = clipped.substring(0, 160);
     }
 
-    // Free both I2S ports so ESP32-audioI2S can drive the amp
-    end();
+    const String encoded = urlEncode(clipped);
+    Serial.printf("Speaking (online TTS): %s\n", clipped.c_str());
+
+    // Keep mic quiet during download; keep our speaker driver (I2S1)
     microphone.end();
     delay(20);
 
+    uint8_t *mp3 = nullptr;
+    size_t mp3Len = 0;
     bool ok = false;
-    {
-        // Destroy Audio BEFORE re-installing our I2S drivers (prevents crash)
-        Audio audio;
-        audio.setPinout(SPK_BCLK, SPK_LRC, SPK_DIN);
-        audio.setVolume(21);
 
-        Serial.println("Speaking on speaker (Google TTS fallback)...");
-        if (!audio.connecttospeech(clipped.c_str(), "en"))
+    // 1) Google Translate TTS
+    {
+        const String path =
+            String("/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=") + encoded;
+        if (downloadUrl("translate.google.com", path, &mp3, &mp3Len))
         {
-            Serial.println("Google TTS failed to start");
-        }
-        else
-        {
-            const unsigned long start = millis();
-            while (audio.isRunning())
-            {
-                audio.loop();
-                if (millis() - start > 45000)
-                {
-                    Serial.println("TTS playback timeout");
-                    break;
-                }
-                delay(1);
-            }
-            audio.stopSong();
-            ok = true;
+            ok = playMp3Buffer(mp3, mp3Len);
+            free(mp3);
+            mp3 = nullptr;
         }
     }
 
-    delay(50);
-    begin();
+    // 2) StreamElements fallback (also free MP3)
+    if (!ok)
+    {
+        Serial.println("Google TTS failed — trying StreamElements...");
+        const String path =
+            String("/kappa/v2/speech?voice=Brian&text=") + encoded;
+        if (downloadUrl("api.streamelements.com", path, &mp3, &mp3Len))
+        {
+            ok = playMp3Buffer(mp3, mp3Len);
+            free(mp3);
+            mp3 = nullptr;
+        }
+    }
+
     microphone.begin();
+
     if (ok)
     {
         Serial.println("Speaker playback done");
+    }
+    else
+    {
+        Serial.println("Online TTS failed — playing error beeps");
+        playTone(400, 150);
+        delay(80);
+        playTone(400, 150);
     }
     return ok;
 }

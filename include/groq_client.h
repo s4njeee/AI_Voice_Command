@@ -21,18 +21,25 @@ public:
     // Same as speakToFile(text, REPLY_FILE)
     bool speak(const String &text);
 
-    // Build PROMPT_FILE with Orpheus and play it
+    // Play cached PROMPT_FILE if valid; else try Orpheus once; else false
     bool ensurePromptAudio(const char *outputFile);
 
-    bool quotaBlocked() const { return quotaBlocked_; }
-    void clearQuotaBlock() { quotaBlocked_ = false; }
+    // STT/chat rate limit (temporary). Orpheus TTS 429 does NOT set this.
+    bool quotaBlocked() const;
+    void clearQuotaBlock();
+
+    bool ttsRateLimited() const { return ttsRateLimited_; }
 
 private:
     bool quotaBlocked_ = false;
+    unsigned long quotaBlockedUntil_ = 0;
+    bool ttsRateLimited_ = false;
+
     void handleApiFailure(int httpStatus, const String &body, const char *where);
     String clipForOrpheus(const String &text) const;
     bool fetchSpeechWav(const String &text, uint8_t **outData, size_t *outLen);
     bool saveWavFile(const char *path, const uint8_t *data, size_t len);
+    bool cachedWavLooksValid(const char *path) const;
 };
 
 extern GroqClient groq;

@@ -229,14 +229,20 @@ void setup()
     wav.begin();
     groq.begin();
 
+    // Hardware check: if you hear two beeps, amp + I2S wiring is OK
+    Serial.println("Speaker hardware test...");
+    speaker.playTone(880, 180);
+    delay(60);
+    speaker.playTone(1175, 220);
+
     if (wifiManager.connected())
     {
         setBusy(true);
-        Serial.println("Generating prompt.wav with Groq Orpheus...");
+        Serial.println("Preparing greeting audio...");
         if (!groq.ensurePromptAudio(PROMPT_FILE))
         {
-            Serial.println("Orpheus prompt failed — Google TTS fallback.");
-            speaker.speakText(PROMPT_TEXT);
+            Serial.println("Orpheus prompt unavailable — online TTS fallback.");
+            speaker.speakText(PROMPT_TEXT_PLAIN);
         }
         setBusy(false);
     }
@@ -262,10 +268,14 @@ void loop()
         if (millis() - lastWarn > 20000)
         {
             lastWarn = millis();
-            Serial.println("Paused: Groq rate limit. Wait, then reboot.");
+            Serial.println("Paused briefly: Groq STT/chat rate limit (TTS still OK via Google).");
         }
         delay(500);
         return;
+    }
+    else
+    {
+        groq.clearQuotaBlock();
     }
 
     if (!microphone.waitForSpeech(0))
@@ -308,12 +318,12 @@ void loop()
     if (command.length() < 2)
     {
         Serial.println("Asking what the user wants...");
-        // Prefer cached /prompt.wav, else regenerate with Orpheus
+        // Prefer cached /prompt.wav, else Orpheus, else Google TTS
         if (!speaker.playWavFile(PROMPT_FILE))
         {
             if (!groq.speakToFile(PROMPT_TEXT, PROMPT_FILE))
             {
-                speaker.speakText(PROMPT_TEXT);
+                speaker.speakText(PROMPT_TEXT_PLAIN);
             }
         }
 

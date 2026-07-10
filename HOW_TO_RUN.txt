@@ -14,7 +14,11 @@ C:\Users\Nexus\Desktop\Smartcane demo
    - `GROQ_API_KEY` (`gsk_...`)
 3. Connect ESP32-S3 by USB
 4. PlatformIO: **Build** then **Upload** then **Monitor**
-5. Serial must show: `3.4.0-GROQ`
+5. Serial must show: `3.5.1-GROQ`
+6. On boot you must hear two short beeps (speaker wiring test), then a spoken greeting
+
+If Orpheus TTS is rate-limited (HTTP 429), the cane still listens and replies
+using Google TTS on the speaker. Do not reboot in a loop — that wastes quota.
 
 ## WAV files (automatic)
 | File | Purpose |

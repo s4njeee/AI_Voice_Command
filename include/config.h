@@ -6,7 +6,7 @@
 //======================================================
 
 #define PROJECT_NAME    "Smartcane AI Voice (Groq)"
-#define PROJECT_VERSION "3.4.1-GROQ"
+#define PROJECT_VERSION "3.5.1-GROQ"
 
 //======================================================
 // Wake Word
@@ -105,13 +105,13 @@
 #define REPLY_FILE   "/reply.wav"
 #define PROMPT_FILE  "/prompt.wav"
 
-// Orpheus-style prompt with vocal direction
+// Orpheus-style prompt with vocal direction (keep short — Orpheus TPD is tiny)
 #define PROMPT_TEXT \
     "[cheerful] Hi, I am Smartcane. What do you need?"
 
-// Playground-style line used when building PROMPT_FILE at boot
-#define ORPHEUS_TEST_TEXT \
-    "Welcome to Orpheus text-to-speech. [cheerful] This is Smartcane ready."
+// Plain text for Google TTS (no Orpheus tags)
+#define PROMPT_TEXT_PLAIN \
+    "Hi, I am Smartcane. What do you need?"
 
 //======================================================
 // HTTPS

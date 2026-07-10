@@ -8,6 +8,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <cstring>
 
 GroqClient groq;
 
@@ -40,6 +41,25 @@ static void resumeAudioAfterApi()
     speaker.begin();
 }
 
+bool GroqClient::quotaBlocked() const
+{
+    if (!quotaBlocked_)
+    {
+        return false;
+    }
+    if (quotaBlockedUntil_ != 0 && millis() >= quotaBlockedUntil_)
+    {
+        return false;
+    }
+    return true;
+}
+
+void GroqClient::clearQuotaBlock()
+{
+    quotaBlocked_ = false;
+    quotaBlockedUntil_ = 0;
+}
+
 void GroqClient::handleApiFailure(int httpStatus, const String &body, const char *where)
 {
     Serial.printf("%s failed HTTP %d\n", where, httpStatus);
@@ -55,6 +75,7 @@ void GroqClient::handleApiFailure(int httpStatus, const String &body, const char
         Serial.println("https://console.groq.com/playground?model=canopylabs/orpheus-v1-english");
         Serial.println("Then reboot. Until then, Google TTS fallback is used.");
         Serial.println("========================================");
+        ttsRateLimited_ = true;
     }
     else if (httpStatus == 404)
     {
@@ -62,8 +83,18 @@ void GroqClient::handleApiFailure(int httpStatus, const String &body, const char
     }
     else if (httpStatus == 429 || body.indexOf("rate_limit") >= 0)
     {
-        quotaBlocked_ = true;
-        Serial.println("Groq free-tier rate limit hit. Wait, then reboot.");
+        // Orpheus TTS TPD is tiny — do NOT freeze STT/chat for that.
+        if (where != nullptr && strcmp(where, "TTS") == 0)
+        {
+            ttsRateLimited_ = true;
+            Serial.println("Orpheus TTS rate-limited. Using Google TTS. STT/chat still active.");
+        }
+        else
+        {
+            quotaBlocked_ = true;
+            quotaBlockedUntil_ = millis() + 60000UL;
+            Serial.println("Groq STT/chat rate limit. Pausing ~60s, then retrying.");
+        }
     }
 
     if (body.length() > 0 && body.length() < 600)
@@ -92,19 +123,58 @@ bool GroqClient::begin()
     return true;
 }
 
+bool GroqClient::cachedWavLooksValid(const char *path) const
+{
+    if (path == nullptr || !LittleFS.exists(path))
+    {
+        return false;
+    }
+
+    File f = LittleFS.open(path, "r");
+    if (!f || f.size() < 44)
+    {
+        if (f)
+        {
+            f.close();
+        }
+        return false;
+    }
+
+    uint8_t hdr[12];
+    const size_t n = f.read(hdr, sizeof(hdr));
+    f.close();
+    if (n != sizeof(hdr))
+    {
+        return false;
+    }
+
+    return hdr[0] == 'R' && hdr[1] == 'I' && hdr[2] == 'F' && hdr[3] == 'F' &&
+           hdr[8] == 'W' && hdr[9] == 'A' && hdr[10] == 'V' && hdr[11] == 'E';
+}
+
 bool GroqClient::ensurePromptAudio(const char *outputFile)
 {
+    // Reuse cached greeting — avoids burning Orpheus TPD every reboot
+    if (cachedWavLooksValid(outputFile))
+    {
+        Serial.printf("Playing cached %s...\n", outputFile);
+        if (speaker.playWavFile(outputFile))
+        {
+            return true;
+        }
+    }
+
+    if (ttsRateLimited_)
+    {
+        Serial.println("Orpheus TTS limited — skip prompt build.");
+        return false;
+    }
+
     Serial.printf("Building %s with Orpheus voice=%s...\n",
                   outputFile, GROQ_TTS_VOICE);
 
-    // Prefer the Smartcane prompt; fall back to playground-style test line
-    if (speakToFile(PROMPT_TEXT, outputFile))
-    {
-        return true;
-    }
-
-    Serial.println("Prompt failed — trying Orpheus test line...");
-    return speakToFile(ORPHEUS_TEST_TEXT, outputFile);
+    // One attempt only (second Orpheus call wastes TPD after a 429)
+    return speakToFile(PROMPT_TEXT, outputFile);
 }
 
 String GroqClient::clipForOrpheus(const String &text) const
@@ -155,6 +225,11 @@ bool GroqClient::saveWavFile(const char *path, const uint8_t *data, size_t len)
 
 bool GroqClient::speakToFile(const String &text, const char *wavPath)
 {
+    if (ttsRateLimited_)
+    {
+        return false;
+    }
+
     uint8_t *wav = nullptr;
     size_t len = 0;
     if (!fetchSpeechWav(text, &wav, &len))
@@ -203,6 +278,11 @@ bool GroqClient::fetchSpeechWav(const String &text, uint8_t **outData, size_t *o
 {
     *outData = nullptr;
     *outLen = 0;
+
+    if (ttsRateLimited_)
+    {
+        return false;
+    }
 
     const String clipped = clipForOrpheus(text);
     if (clipped.length() == 0)
