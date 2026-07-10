@@ -229,11 +229,11 @@ void setup()
     wav.begin();
     groq.begin();
 
-    // Hardware check: if you hear two beeps, amp + I2S wiring is OK
-    Serial.println("Speaker hardware test...");
-    speaker.playTone(880, 180);
-    delay(60);
-    speaker.playTone(1175, 220);
+    // Hardware check: loud square beeps — if silent, wiring/amp power is wrong
+    Serial.println("Speaker hardware test (listen for 2 loud beeps)...");
+    speaker.playTone(880, 350);
+    delay(100);
+    speaker.playTone(1175, 400);
 
     if (wifiManager.connected())
     {

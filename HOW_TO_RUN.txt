@@ -14,10 +14,11 @@ C:\Users\Nexus\Desktop\Smartcane demo
    - `GROQ_API_KEY` (`gsk_...`)
 3. Connect ESP32-S3 by USB
 4. PlatformIO: **Build** then **Upload** then **Monitor**
-5. Serial must show: `3.5.3-GROQ`
-6. On boot you must hear two short beeps, then a spoken greeting
-7. MAX98357A DIN must be on **GPIO 11** (not 45). BCLK=48, LRC=47.
-8. Amp SD pin must stay floating (not GND)
+5. Serial must show: `3.6.0-GROQ` and `I2S1 16-bit stereo`
+6. Boot must play loud square-wave beeps
+7. MAX98357A: BCLK=48, LRC=47, DIN=45, VIN=5V preferred, SD floating, speaker on +/− only
+8. Mute YouTube/TV while testing — mic picks it up and Whisper mis-hears commands
+
 
 If Orpheus TTS is rate-limited (HTTP 429), the cane still listens and replies
 using Google TTS on the speaker. Do not reboot in a loop — that wastes quota.

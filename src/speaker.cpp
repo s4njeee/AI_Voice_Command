@@ -3,6 +3,7 @@
 #include "microphone.h"
 
 #include <driver/i2s.h>
+#include <driver/gpio.h>
 #include <LittleFS.h>
 #include <WiFiClientSecure.h>
 #include <math.h>
@@ -25,11 +26,11 @@ bool Speaker::setSampleRate(uint32_t sampleRate)
         return true;
     }
 
-    // On ESP32-S3, i2s_set_sample_rates() is unreliable — set full clock
+    // 16-bit stereo clock — matches common MAX98357A + ESP32-S3 setups
     esp_err_t err = i2s_set_clk(
         SPK_I2S_PORT,
         sampleRate,
-        I2S_BITS_PER_SAMPLE_32BIT,
+        I2S_BITS_PER_SAMPLE_16BIT,
         I2S_CHANNEL_STEREO);
 
     if (err != ESP_OK)
@@ -50,18 +51,25 @@ bool Speaker::begin()
         return true;
     }
 
-    // MAX98357A: 32-bit stereo slots, 16-bit PCM in the high half.
-    // Missing mck_io_num on ESP32-S3 previously defaulted MCLK to GPIO0.
+    // Reset pins so leftover peripheral matrix state cannot mute DIN
+    gpio_reset_pin((gpio_num_t)SPK_BCLK);
+    gpio_reset_pin((gpio_num_t)SPK_LRC);
+    gpio_reset_pin((gpio_num_t)SPK_DIN);
+    gpio_set_drive_capability((gpio_num_t)SPK_BCLK, GPIO_DRIVE_CAP_3);
+    gpio_set_drive_capability((gpio_num_t)SPK_LRC, GPIO_DRIVE_CAP_3);
+    gpio_set_drive_capability((gpio_num_t)SPK_DIN, GPIO_DRIVE_CAP_3);
+
+    // Proven MAX98357A path: 16-bit Philips I2S, stereo frames, L=R
     i2s_config_t i2s_config =
     {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 8,
-        .dma_buf_len = 256,
+        .dma_buf_len = 512,
         .use_apll = false,
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0
@@ -101,8 +109,12 @@ bool Speaker::begin()
 
     started_ = true;
 
-    Serial.printf("Speaker Ready (I2S1 BCLK=%d LRC=%d DIN=%d, 32-bit stereo)\n",
+    Serial.println("========================================");
+    Serial.printf("Speaker Ready %s\n", PROJECT_VERSION);
+    Serial.printf("I2S1 16-bit stereo  BCLK=%d LRC=%d DIN=%d\n",
                   SPK_BCLK, SPK_LRC, SPK_DIN);
+    Serial.println("If silent: VIN=5V, SD floating, DIN wire on that GPIO");
+    Serial.println("========================================");
     return true;
 }
 
@@ -113,8 +125,8 @@ bool Speaker::playPCM(const int16_t *buffer, size_t samples)
         return false;
     }
 
-    // Static — avoids stack overflow in loopTask during TTS
-    static int32_t stereo[256];
+    // Static stereo int16 L=R (NOT 32-bit — that was silent on many MAX98357A)
+    static int16_t stereo[256];
     size_t done = 0;
 
     while (done < samples)
@@ -122,7 +134,7 @@ bool Speaker::playPCM(const int16_t *buffer, size_t samples)
         const size_t n = (samples - done > 128) ? 128 : (samples - done);
         for (size_t i = 0; i < n; i++)
         {
-            const int32_t s = ((int32_t)buffer[done + i]) << 16;
+            const int16_t s = buffer[done + i];
             stereo[i * 2] = s;
             stereo[i * 2 + 1] = s;
         }
@@ -131,7 +143,7 @@ bool Speaker::playPCM(const int16_t *buffer, size_t samples)
         esp_err_t err = i2s_write(
             SPK_I2S_PORT,
             stereo,
-            n * 2 * sizeof(int32_t),
+            n * 2 * sizeof(int16_t),
             &bytesWritten,
             portMAX_DELAY);
 
@@ -159,20 +171,21 @@ bool Speaker::playTone(uint32_t freqHz, uint32_t durationMs)
     }
 
     const size_t totalSamples = (SAMPLE_RATE * durationMs) / 1000;
-    int16_t chunk[128];
+    static int16_t chunk[128];
     size_t produced = 0;
 
-    Serial.printf("Speaker tone %lu Hz %lu ms\n",
+    Serial.printf("Speaker tone %lu Hz %lu ms (square)\n",
                   (unsigned long)freqHz, (unsigned long)durationMs);
 
+    // Loud square wave — easier to hear than a soft sine if gain is low
     while (produced < totalSamples)
     {
         const size_t n = (totalSamples - produced > 128) ? 128 : (totalSamples - produced);
         for (size_t i = 0; i < n; i++)
         {
-            const float t = (float)(produced + i) / (float)SAMPLE_RATE;
-            // ~50% amplitude — loud enough to hear, not clipped
-            chunk[i] = (int16_t)(sinf(2.0f * 3.14159265f * (float)freqHz * t) * 28000.0f);
+            const size_t idx = produced + i;
+            const size_t period = SAMPLE_RATE / freqHz;
+            chunk[i] = ((period > 0) && ((idx % period) < (period / 2))) ? 30000 : -30000;
         }
         if (!playPCM(chunk, n))
         {
@@ -181,7 +194,6 @@ bool Speaker::playTone(uint32_t freqHz, uint32_t durationMs)
         produced += n;
     }
 
-    // brief silence to settle amp
     memset(chunk, 0, sizeof(chunk));
     playPCM(chunk, 128);
     return true;

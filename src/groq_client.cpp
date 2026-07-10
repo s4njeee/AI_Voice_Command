@@ -631,7 +631,8 @@ String GroqClient::chat(const String &prompt)
     systemMsg["content"] =
         "You are Smartcane, a voice assistant for a blind/low-vision user. "
         "Reply in ONE short sentence, max 12 words. "
-        "No markdown, lists, questions, or filler.";
+        "If the request sounds like TV, YouTube, or a video, reply exactly: Please repeat your question. "
+        "No markdown, lists, or filler.";
 
     JsonObject userMsg = messages.add<JsonObject>();
     userMsg["role"] = "user";
