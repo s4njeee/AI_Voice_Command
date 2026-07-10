@@ -1,0 +1,4 @@
+#!/bin/sh
+# Auto-push after every successful commit
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
+git push -u origin "$branch" 2>/dev/null || git push origin "$branch" || true
