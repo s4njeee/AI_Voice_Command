@@ -116,6 +116,32 @@
 #define PROMPT_TEXT_PLAIN \
     "Hi, I am Smartcane. What do you need?"
 
+// [xypher] GPIO pins for devices the cane can control with voice commands.
+// Change these pin numbers to match your actual wiring before uploading.
+#define RELAY_PIN          38   // Controls a relay (light, fan, etc.)
+#define BUZZER_PIN         39   // Piezo buzzer for alerts
+#define MOTOR_PIN          40   // DC motor via MOSFET
+#define AUX_LED_PIN        41   // Extra LED indicator
+
+// [xypher] Set to true if your relay turns ON when the pin is LOW.
+#define RELAY_ACTIVE_LOW   false
+
+// [xypher] Default IP, port, and endpoint for the guardian's mobile application.
+// Used when an SOS/help command is given by the user to alert the guardian.
+#define GUARDIAN_APP_IP      "192.168.1.100"
+#define GUARDIAN_APP_PORT    8080
+#define GUARDIAN_APP_PATH    "/alert"
+
+// [xypher] Offline/local fallback location & timezone offset (seconds from UTC).
+// Used if the internet is down and IP geolocation cannot be fetched.
+#define LOCAL_CITY           "Manila"
+#define LOCAL_REGION         "Metro Manila"
+#define LOCAL_COUNTRY        "Philippines"
+#define LOCAL_UTC_OFFSET     28800  // GMT+8 offset in seconds (8 * 3600)
+
+// [xypher] Max tokens the AI uses when classifying a command (keeps it fast).
+#define CLASSIFY_MAX_TOKENS 60
+
 //======================================================
 // HTTPS
 //======================================================

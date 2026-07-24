@@ -5,6 +5,8 @@
 #include "speaker.h"
 
 #include <esp_wifi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 
 WiFiManagerESP wifiManager;
 
@@ -279,10 +281,18 @@ void WiFiManagerESP::onConnected()
         Serial.println("DNS lookup for api.groq.com failed");
     }
     Serial.println("================================");
+    
+    fetchLocationAndTime(); // [xypher] Retrieve location and synchronize NTP on connection
 }
 
 void WiFiManagerESP::begin()
 {
+    // [xypher] Set default offline/local location values on boot
+    city_ = LOCAL_CITY;
+    region_ = LOCAL_REGION;
+    country_ = LOCAL_COUNTRY;
+    hasLocation_ = true;
+
     Serial.println();
     Serial.println("================================");
     Serial.println("Connecting to WiFi...");
@@ -391,4 +401,45 @@ String WiFiManagerESP::ipAddress()
     }
 
     return WiFi.localIP().toString();
+}
+
+// [xypher] Fetches location via IP Geolocation (ip-api.com) and synchronizes
+// the ESP32 internal clock to local time using NTP.
+void WiFiManagerESP::fetchLocationAndTime()
+{
+    Serial.println("[xypher] Fetching location and local time timezone offset...");
+    HTTPClient http;
+    http.setTimeout(10000);
+    if (http.begin("http://ip-api.com/json"))
+    {
+        int httpCode = http.GET();
+        if (httpCode == 200)
+        {
+            String payload = http.getString();
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, payload);
+            if (!error && doc["status"].as<String>() == "success")
+            {
+                city_ = doc["city"].as<String>();
+                region_ = doc["regionName"].as<String>();
+                country_ = doc["country"].as<String>();
+                long offset = doc["offset"].as<long>();
+                hasLocation_ = true;
+
+                Serial.printf("[xypher] Location detected: %s, %s, %s (Offset: %ld seconds)\n",
+                              city_.c_str(), region_.c_str(), country_.c_str(), offset);
+
+                configTime(offset, 0, "pool.ntp.org", "time.nist.gov");
+            }
+            else
+            {
+                Serial.println("[xypher] Failed to parse geolocation data");
+            }
+        }
+        else
+        {
+            Serial.printf("[xypher] Geolocation HTTP request failed: %d\n", httpCode);
+        }
+        http.end();
+    }
 }
