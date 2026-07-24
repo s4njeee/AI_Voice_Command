@@ -237,12 +237,15 @@ bool GroqClient::speakToFile(const String &text, const char *wavPath)
         return false;
     }
 
-    const bool saved = saveWavFile(wavPath, wav, len);
     bool played = false;
 
-    if (saved)
+    if (wavPath != nullptr && strlen(wavPath) > 0)
     {
-        played = speaker.playWavFile(wavPath);
+        const bool saved = saveWavFile(wavPath, wav, len);
+        if (saved)
+        {
+            played = speaker.playWavFile(wavPath);
+        }
     }
 
     if (!played)
@@ -257,7 +260,7 @@ bool GroqClient::speakToFile(const String &text, const char *wavPath)
 
 bool GroqClient::speak(const String &text)
 {
-    return speakToFile(text, REPLY_FILE);
+    return speakToFile(text, nullptr);
 }
 
 bool GroqClient::textToSpeech(const String &text, const char *outputFile)
@@ -689,6 +692,197 @@ String GroqClient::chat(const String &prompt)
     return answer;
 }
 
+// [xypher] Sends the user's voice command to the AI and asks:
+// "Is this a device command (gpio/http) or just a question?"
+// The AI replies with a small JSON like {"type":"gpio","device":"relay","state":"on"}.
+// We parse that JSON into an ActionResult so the dispatcher can act on it.
+ActionResult GroqClient::classifyAction(const String &command)
+{
+    ActionResult result;
+    result.type = ACTION_QUERY;
+
+    if (command.length() == 0)
+    {
+        return result;
+    }
+
+    const String key = groqApiKey();
+    pauseAudioForApi();
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(HTTPS_TIMEOUT / 1000);
+
+    HTTPClient https;
+    https.setTimeout(HTTPS_TIMEOUT);
+
+    if (!https.begin(client, AI_CHAT_URL))
+    {
+        Serial.println("Classify: cannot connect to Groq");
+        resumeAudioAfterApi();
+        return result;
+    }
+
+    https.addHeader("Content-Type", "application/json");
+    https.addHeader("Authorization", "Bearer " + key);
+
+    // [xypher] Build the request — low temperature (0.0) for consistent answers,
+    // small token limit so the AI only returns a short JSON.
+    JsonDocument doc;
+    doc["model"] = GROQ_CHAT_MODEL;
+    doc["temperature"] = 0.0;
+    doc["max_tokens"] = CLASSIFY_MAX_TOKENS;
+
+    JsonArray messages = doc["messages"].to<JsonArray>();
+
+    // [xypher] System prompt — tells the AI exactly how to classify commands.
+    // It maps device names to hardware and detects time/location requests.
+    JsonObject systemMsg = messages.add<JsonObject>();
+    systemMsg["role"] = "system";
+    systemMsg["content"] =
+        "You classify voice commands for a smart cane IoT device. "
+        "Respond ONLY with a JSON object, no markdown, no extra text.\n\n"
+        "If the command asks for the current time, date, today's day, or calendar info, respond:\n"
+        "{\"type\":\"time\"}\n\n"
+        "If the command asks for the user's location, coordinates, city, region, country, or GPS info, respond:\n"
+        "{\"type\":\"location\"}\n\n"
+        "If the command controls a physical device, respond:\n"
+        "{\"type\":\"gpio\",\"device\":\"<relay|led|buzzer|motor>\",\"state\":\"<on|off|toggle>\",\"feedback\":\"<short confirmation>\"}\n"
+        "If the state (on/off/toggle) is not specified or ambiguous (e.g. 'vibrate' or 'light'), infer the logical state (e.g. 'toggle' or 'on').\n\n"
+        "If the command asks to call, alert, or notify their guardian/helper for emergency help, respond:\n"
+        "{\"type\":\"guardian\",\"alertType\":\"<app|sms>\",\"feedback\":\"<short spoken confirmation>\"}\n"
+        "If the user specifically asks for an SMS, text message, or messaging/texting (e.g. 'send sms', 'text helper'), set alertType: 'sms'. Otherwise default alertType to 'app'.\n\n"
+        "Otherwise if the user is asking general questions, respond:\n"
+        "{\"type\":\"query\"}\n\n"
+        "Device mapping:\n"
+        "- light/lamp/fan -> device: relay\n"
+        "- alarm/beep/alert -> device: buzzer\n"
+        "- vibrate/motor -> device: motor\n"
+        "- LED/indicator -> device: led\n\n"
+        "Examples:\n"
+        "\"what time is it\" -> {\"type\":\"time\"}\n"
+        "\"what day is it today\" -> {\"type\":\"time\"}\n"
+        "\"where am I\" -> {\"type\":\"location\"}\n"
+        "\"what country am I in\" -> {\"type\":\"location\"}\n"
+        "\"help me\" -> {\"type\":\"guardian\",\"alertType\":\"app\",\"feedback\":\"Alerting your guardian. Help is on the way.\"}\n"
+        "\"text my helper\" -> {\"type\":\"guardian\",\"alertType\":\"sms\",\"feedback\":\"Sending SMS text alert to your helper.\"}\n"
+        "\"turn on the light\" -> {\"type\":\"gpio\",\"device\":\"relay\",\"state\":\"on\",\"feedback\":\"Light turned on\"}\n"
+        "\"sound the alarm\" -> {\"type\":\"gpio\",\"device\":\"buzzer\",\"state\":\"on\",\"feedback\":\"Alarm activated\"}\n"
+        "\"what is the weather\" -> {\"type\":\"query\"}";
+
+    JsonObject userMsg = messages.add<JsonObject>();
+    userMsg["role"] = "user";
+    userMsg["content"] = command;
+
+    String body;
+    serializeJson(doc, body);
+
+    // [xypher] Send the classification request to Groq
+    Serial.println("Classify action...");
+    int httpCode = https.POST(body);
+    if (httpCode <= 0)
+    {
+        Serial.printf("Classify HTTP error: %s\n",
+                      https.errorToString(httpCode).c_str());
+        https.end();
+        resumeAudioAfterApi();
+        return result;
+    }
+
+    String response = https.getString();
+    Serial.printf("Classify HTTP %d\n", httpCode);
+
+    if (httpCode != 200)
+    {
+        handleApiFailure(httpCode, response, "Classify");
+        https.end();
+        resumeAudioAfterApi();
+        return result;
+    }
+
+    // [xypher] Groq wraps the AI's answer inside a chat completion JSON.
+    // First we extract the AI's text from choices[0].message.content.
+    JsonDocument chatResult;
+    DeserializationError error = deserializeJson(chatResult, response);
+    https.end();
+    resumeAudioAfterApi();
+
+    if (error)
+    {
+        Serial.printf("Classify JSON parse error: %s\n", error.c_str());
+        return result;
+    }
+
+    String content = chatResult["choices"][0]["message"]["content"].as<String>();
+    content.trim();
+    Serial.printf("Classify result: %s\n", content.c_str());
+
+    // [xypher] Sometimes the AI wraps its JSON in ```code fences``` — strip them.
+    if (content.startsWith("```"))
+    {
+        int firstNewline = content.indexOf('\n');
+        int lastFence = content.lastIndexOf("```");
+        if (firstNewline > 0 && lastFence > firstNewline)
+        {
+            content = content.substring(firstNewline + 1, lastFence);
+            content.trim();
+        }
+    }
+
+    // [xypher] Now parse the AI's JSON into our ActionResult struct.
+    // If parsing fails, we just treat it as a question (ACTION_QUERY).
+    JsonDocument actionDoc;
+    error = deserializeJson(actionDoc, content);
+    if (error)
+    {
+        Serial.printf("Classify action JSON error: %s\n", error.c_str());
+        return result;
+    }
+
+    String actionType = actionDoc["type"].as<String>();
+    actionType.toLowerCase();
+
+    // [xypher] Fill in the ActionResult based on what the AI decided
+    if (actionType == "gpio")
+    {
+        result.type = ACTION_GPIO;
+        result.device = actionDoc["device"].as<String>();
+        result.state = actionDoc["state"].as<String>();
+        result.feedback = actionDoc["feedback"].as<String>();
+    }
+    else if (actionType == "guardian" || actionType == "alert")
+    {
+        result.type = ACTION_ALERT_GUARDIAN;
+        result.alertMsg = "User requested emergency assistance!";
+        result.alertType = actionDoc["alertType"].as<String>();
+        if (result.alertType.length() == 0)
+        {
+            result.alertType = "app";
+        }
+        result.feedback = actionDoc["feedback"].as<String>();
+        if (result.feedback.length() == 0)
+        {
+            result.feedback = (result.alertType == "sms") 
+                ? "Sending SMS text alert to your guardian." 
+                : "Alerting your guardian. Help is on the way.";
+        }
+    }
+    else if (actionType == "time")
+    {
+        result.type = ACTION_TIME;
+    }
+    else if (actionType == "location")
+    {
+        result.type = ACTION_LOCATION;
+    }
+    else
+    {
+        result.type = ACTION_QUERY;
+    }
+
+    return result;
+}
+
 String GroqClient::speechToText(const char *wavFile)
 {
     const String key = groqApiKey();
@@ -727,7 +921,7 @@ String GroqClient::speechToText(const char *wavFile)
     head += "\r\n--";
     head += boundary;
     head += "\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n";
-    head += "Smartcane. Hey Smartcane. Voice commands for help, directions, time, weather.";
+    head += "Smartcane. Hey Smartcane. Voice commands for help, directions, time, date, location, GPS, city, region, country, emergency.";
     head += "\r\n--";
     head += boundary;
     head += "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"record.wav\"\r\n";

@@ -2,6 +2,7 @@
 #define GROQ_CLIENT_H
 
 #include <Arduino.h>
+#include "action_dispatcher.h"  // [xypher] Needed for ActionResult type
 
 class GroqClient
 {
@@ -11,6 +12,11 @@ public:
     String speechToText(const char *wavFile);
 
     String chat(const String &prompt);
+
+    // [xypher] Asks the AI to figure out if a voice command is a device action
+    // (like "turn on the light") or just a question (like "what time is it").
+    // Returns an ActionResult with the action type and details.
+    ActionResult classifyAction(const String &command);
 
     // Save Orpheus speech into a .wav path (PROMPT_FILE / REPLY_FILE)
     bool textToSpeech(const String &text, const char *outputFile);

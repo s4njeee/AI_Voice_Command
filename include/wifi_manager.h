@@ -10,6 +10,13 @@ public:
     bool connected();
     String ipAddress();
 
+    // [xypher] Getters for local timezone/location fields
+    String getCity() { return city_; }
+    String getRegion() { return region_; }
+    String getCountry() { return country_; }
+    bool hasLocation() { return hasLocation_; }
+    void fetchLocationAndTime();
+
 private:
     bool connectOnce(uint32_t timeoutMs);
     void hardResetRadio();
@@ -24,6 +31,12 @@ private:
     unsigned long lastAttempt_ = 0;
     bool wasConnected_ = false;
     bool audioPaused_ = false;
+
+    // [xypher] Geolocation storage
+    String city_ = "";
+    String region_ = "";
+    String country_ = "";
+    bool hasLocation_ = false;
 };
 
 extern WiFiManagerESP wifiManager;

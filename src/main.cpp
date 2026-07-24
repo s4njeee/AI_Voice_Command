@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <time.h>
 
 #include "config.h"
 #include "secrets.h"
@@ -6,6 +7,7 @@
 #include "microphone.h"
 #include "speaker.h"
 #include "groq_client.h"
+#include "action_dispatcher.h"  // [xypher] IoT action execution from voice commands
 #include "wav.h"
 
 int16_t audioBuffer[512];
@@ -176,11 +178,119 @@ static bool recordSeconds(uint32_t seconds, bool stopOnSilence)
     return recordedSamples > 0;
 }
 
+// Process voice command (local execution or fallback to AI)
 static bool handleCommand(const String &command)
 {
     Serial.print("Command: ");
     Serial.println(command);
 
+    // Try local keyword match first
+    ActionResult action;
+    bool matched = actionDispatcher.localMatch(command, action);
+    if (matched)
+    {
+        Serial.println("Local keyword action matched!");
+    }
+    else
+    {
+        Serial.println("No local match. Falling back to AI classification...");
+        action = groq.classifyAction(command);
+    }
+
+    // Execute device action, status check, or alert locally
+    if (action.type == ACTION_GPIO || action.type == ACTION_ALERT_GUARDIAN ||
+        action.type == ACTION_TIME || action.type == ACTION_LOCATION)
+    {
+        String feedback = "";
+        bool ok = true;
+
+        if (action.type == ACTION_GPIO || action.type == ACTION_ALERT_GUARDIAN)
+        {
+            ok = actionDispatcher.execute(action);
+
+            feedback = ok
+                ? (action.feedback.length() > 0 ? action.feedback : "Done.")
+                : "Sorry, that action failed.";
+        }
+        else if (action.type == ACTION_TIME)
+        {
+            time_t now = time(nullptr);
+            struct tm timeinfo;
+            if (now > 1700000000 && getLocalTime(&timeinfo))
+            {
+                char timeStr[64];
+                char dateStr[64];
+                strftime(timeStr, sizeof(timeStr), "%I:%M %p", &timeinfo);
+                strftime(dateStr, sizeof(dateStr), "%A, %B %d, %Y", &timeinfo);
+
+                String cmd = command;
+                cmd.toLowerCase();
+
+                if (cmd.indexOf("date") >= 0 || cmd.indexOf("day") >= 0 || cmd.indexOf("today") >= 0 || cmd.indexOf("calendar") >= 0)
+                {
+                    if (cmd.indexOf("time") >= 0 || cmd.indexOf("clock") >= 0 || cmd.indexOf("hour") >= 0)
+                    {
+                        feedback = String("The current time is ") + timeStr + ", and today is " + dateStr + ".";
+                    }
+                    else
+                    {
+                        feedback = String("Today is ") + dateStr + ".";
+                    }
+                }
+                else
+                {
+                    feedback = String("The current time is ") + timeStr + ".";
+                }
+            }
+            else
+            {
+                feedback = "Time is not synchronized yet.";
+                ok = false;
+            }
+        }
+        else if (action.type == ACTION_LOCATION)
+        {
+            if (wifiManager.hasLocation())
+            {
+                String cmd = command;
+                cmd.toLowerCase();
+
+                if (cmd.indexOf("country") >= 0)
+                {
+                    feedback = String("You are in ") + wifiManager.getCountry() + ".";
+                }
+                else if (cmd.indexOf("region") >= 0 || cmd.indexOf("state") >= 0)
+                {
+                    feedback = String("You are in ") + wifiManager.getRegion() + ".";
+                }
+                else if (cmd.indexOf("city") >= 0)
+                {
+                    feedback = String("You are in the city of ") + wifiManager.getCity() + ".";
+                }
+                else
+                {
+                    feedback = String("You are in ") + wifiManager.getCity() + ", " + wifiManager.getRegion() + ", " + wifiManager.getCountry() + ".";
+                }
+            }
+            else
+            {
+                feedback = "I cannot determine your location yet.";
+                ok = false;
+            }
+        }
+
+        Serial.print("Action feedback: ");
+        Serial.println(feedback);
+
+        if (groq.speak(feedback))
+        {
+            return true;
+        }
+
+        return speaker.speakText(feedback);
+    }
+
+    // [xypher] Not a device command — treat it as a question and chat
     String reply = groq.chat(command);
     if (reply.length() == 0)
     {
@@ -191,8 +301,7 @@ static bool handleCommand(const String &command)
     Serial.print("Smartcane: ");
     Serial.println(reply);
 
-    // Orpheus -> /reply.wav -> speaker
-    if (groq.speakToFile(reply, REPLY_FILE))
+    if (groq.speak(reply))
     {
         return true;
     }
@@ -205,6 +314,9 @@ void setup()
 {
     Serial.begin(115200);
     delay(1000);
+
+    // [xypher] Initialize time zone offset right away to default offline fallback
+    configTime(LOCAL_UTC_OFFSET, 0, "pool.ntp.org", "time.nist.gov");
 
     Serial.println();
     Serial.println("====================================");
@@ -228,6 +340,7 @@ void setup()
     speaker.begin();
     wav.begin();
     groq.begin();
+    actionDispatcher.begin();  // [xypher] Set up IoT pins so voice commands can control them
 
     // Hardware check: bit-bang first (proves amp wiring), then I2S tones
     Serial.println("Speaker hardware test...");
